@@ -1,21 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Outer geometric ring representing the network -->
+    
+    <!-- Outer Hexagonal Shield Glow -->
+    <path
+        android:fillColor="#D0BCFF"
+        android:alpha="0.15"
+        android:pathData="M54,22L82,38V70L54,86L26,70V38L54,22Z" />
+
+    <!-- Main Hexagonal Shield -->
     <path
         android:fillColor="#FFFFFF"
-        android:alpha="0.2"
-        android:pathData="M54,20C35.2,20 20,35.2 20,54s15.2,34 34,34s34,-15.2 34,-34S72.8,20 54,20zM54,80c-14.4,0 -26,-11.6 -26,-26s11.6,-26 26,-26s26,11.6 26,26S68.4,80 54,80z" />
-    
-    <!-- Shield Shape -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,28L34,36v22c0,12.4 8.5,24 20,27c11.5,-3 20,-14.6 20,-27V36L54,28z" />
-    
-    <!-- Central Accent (Safe/Secure indicator) -->
+        android:pathData="M54,28L76,40V68L54,80L32,68V40L54,28Z" />
+
+    <!-- Inner Core (Representing the Oblivious DNS Query) -->
     <path
         android:fillColor="#6750A4"
-        android:pathData="M54,40l-10,12h7v14l10,-12h-7z" />
+        android:pathData="M54,42L62,47V57L54,62L46,57V47L54,42Z" />
+        
+    <!-- Privacy Horizontal Bar (The "Oblivious" mask) -->
+    <path
+        android:fillColor="#6750A4"
+        android:pathData="M40,51h28v2h-28z" />
 </vector>

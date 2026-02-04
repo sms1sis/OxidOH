@@ -267,19 +267,24 @@ class MainActivity : ComponentActivity() {
             if (cacheTtl != pendingCacheTtl) { cacheTtl = pendingCacheTtl; changed = true }
 
             if (changed) {
+                val finalResolverUrl = pendingResolverUrl
+                val finalBootstrapDns = pendingBootstrapDns
+                val finalListenPort = pendingListenPort
+                val finalCacheTtl = pendingCacheTtl
+
                 prefs.edit()
                     .putString("heartbeat_domain", heartbeatDomain)
                     .putString("heartbeat_interval", heartbeatInterval)
-                    .putString("resolver_url", resolverUrl)
-                    .putString("bootstrap_dns", bootstrapDns)
-                    .putString("listen_port", listenPort)
+                    .putString("resolver_url", finalResolverUrl)
+                    .putString("bootstrap_dns", finalBootstrapDns)
+                    .putString("listen_port", finalListenPort)
                     .putBoolean("allow_ipv6", allowIpv6)
-                    .putString("cache_ttl", cacheTtl)
+                    .putString("cache_ttl", finalCacheTtl)
                     .putInt("selected_profile", selectedProfileIndex)
                     .apply()
                 
                 if (isRunning) {
-                    startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                    startProxyService(finalResolverUrl, finalListenPort, finalBootstrapDns, allowIpv6, finalCacheTtl, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
                 }
             }
         }
@@ -470,8 +475,11 @@ class MainActivity : ComponentActivity() {
                             onProfileSelect = { index ->
                                 selectedProfileIndex = index
                                 if (index < profiles.size - 1) {
-                                    pendingResolverUrl = profiles[index].url
-                                    pendingBootstrapDns = profiles[index].bootstrap
+                                    val profile = profiles[index]
+                                    pendingResolverUrl = profile.url
+                                    pendingBootstrapDns = profile.bootstrap
+                                    resolverUrl = profile.url
+                                    bootstrapDns = profile.bootstrap
                                 }
                             },
                             onUrlChange = { pendingResolverUrl = it },
@@ -1068,7 +1076,7 @@ class MainActivity : ComponentActivity() {
                 if (isRunning) "TAP SHIELD TO DISCONNECT" else "TAP SHIELD TO CONNECT", 
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold, 
-                color = if (isRunning) Color(0xFFE91E63).copy(alpha = 0.7f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                color = if (isRunning) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f) else Color(0xFFE91E63).copy(alpha = 0.7f),
                 letterSpacing = 1.5.sp
             )
         }

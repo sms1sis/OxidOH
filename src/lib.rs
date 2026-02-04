@@ -269,7 +269,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     native_log("INFO", "Starting proxy loops");
 
-    let udp_loop = {
+    let mut udp_loop = {
         let socket = udp_socket.clone();
         let client = client.clone();
         let resolver_url = send_url_str.clone();
@@ -299,7 +299,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         })
     };
 
-    let tcp_loop = {
+    let mut tcp_loop = {
          let listener = tcp_listener;
          let client = client.clone();
          let resolver_url = send_url_str.clone();
@@ -329,9 +329,19 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     };
 
     tokio::select! {
-        _ = &mut shutdown_rx => info!("Shutting down..."),
-        _ = udp_loop => {},
-        _ = tcp_loop => {},
+        _ = &mut shutdown_rx => {
+            native_log("INFO", "Shutting down: Aborting loops");
+            udp_loop.abort();
+            tcp_loop.abort();
+        },
+        _ = &mut udp_loop => {
+            native_log("WARN", "UDP loop exited unexpectedly");
+            tcp_loop.abort();
+        },
+        _ = &mut tcp_loop => {
+            native_log("WARN", "TCP loop exited unexpectedly");
+            udp_loop.abort();
+        },
     }
     Ok(())
 }
