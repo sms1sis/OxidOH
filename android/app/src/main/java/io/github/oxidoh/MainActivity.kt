@@ -1098,7 +1098,7 @@ class MainActivity : ComponentActivity() {
             title = { Text("About SafeDNS") },
             text = {
                 Column {
-                    Text("Version: v0.3.2", fontWeight = FontWeight.Bold)
+                    Text("Version: v0.1.0", fontWeight = FontWeight.Bold)
                     Text("Developer: sms1sis")
                     Spacer(Modifier.height(16.dp))
                     
@@ -1137,7 +1137,7 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun checkForUpdates(context: android.content.Context, uriHandler: androidx.compose.ui.platform.UriHandler) {
         val repoUrl = "https://api.github.com/repos/sms1sis/OxidOH/releases/latest"
-        val currentVersion = "v0.3.2"
+        val currentVersion = "v0.1.0"
 
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
