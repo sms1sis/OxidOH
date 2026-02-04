@@ -1,4 +1,4 @@
-package io.github.oxidoh
+package io.github.sms1sis.oxidoh
 
 import android.Manifest
 import android.content.Context
@@ -64,7 +64,7 @@ import android.graphics.Matrix
 import android.graphics.SweepGradient
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
-import io.github.oxidoh.ui.theme.OxidOHTheme
+import io.github.sms1sis.oxidoh.ui.theme.OxidOHTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -158,11 +158,13 @@ class MainActivity : ComponentActivity() {
         var pendingCacheTtl by remember { mutableStateOf(cacheTtl) }
 
         val profiles = listOf(
-            DnsProfile("Cloudflare", "https://cloudflare-dns.com/dns-query", "1.1.1.1"),
-            DnsProfile("Google", "https://dns.google/dns-query", "8.8.8.8"),
-            DnsProfile("AdGuard", "https://dns.adguard-dns.com/dns-query", "94.140.14.14"),
-            DnsProfile("Quad9", "https://dns.quad9.net/dns-query", "9.9.9.9"),
-            DnsProfile("Custom", "", "")
+            DnsProfile("Cloudflare Direct", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1"),
+            DnsProfile("Cloudflare via Surfly", "https://odoh.cloudflare-dns.com/dns-query https://odoh1.surfly.com/proxy", "1.1.1.1"),
+            DnsProfile("Cloudflare via Apple", "https://odoh.cloudflare-dns.com/dns-query https://odoh.apple.com/proxy", "1.1.1.1"),
+            DnsProfile("IANA via Surfly", "https://odoh.iana.org/dns-query https://odoh1.surfly.com/proxy", "192.0.43.10"),
+            DnsProfile("IANA via Apple", "https://odoh.iana.org/dns-query https://odoh.apple.com/proxy", "192.0.43.10"),
+            DnsProfile("PCCW via Surfly", "https://odoh.pccwglobal.com/dns-query https://odoh1.surfly.com/proxy", "1.1.1.1"),
+            DnsProfile("Custom ODoH", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1")
         )
         
         var selectedProfileIndex by remember { mutableStateOf(prefs.getInt("selected_profile", 0)) }
@@ -218,7 +220,7 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.RequestPermission()
         ) { isGranted ->
             if (!isGranted) {
-                Log.w("SafeDNS", "Notification permission denied")
+                Log.w("OxidOH", "Notification permission denied")
             }
         }
 
@@ -243,7 +245,7 @@ class MainActivity : ComponentActivity() {
                 if (isRunning) {
                     val newLat = ProxyService.getLatency()
                     if (newLat > 0 && newLat != latency) {
-                        Log.d("SafeDNS", "UI Latency update: $newLat ms")
+                        Log.d("OxidOH", "UI Latency update: $newLat ms")
                         latency = newLat
                     }
                     logs = ProxyService.getLogs()
@@ -362,7 +364,7 @@ class MainActivity : ComponentActivity() {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Default.Shield, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.width(8.dp))
-                                Text("SafeDNS", fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp)
+                                Text("OxidOH", fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp)
                             }
                         },
                         navigationIcon = {
@@ -407,7 +409,7 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
-                        tonalElevation = 0.dp // Added tonalElevation as it was present in original NavigationBar
+                        tonalElevation = 0.dp 
                     ) {
                         Row(
                             modifier = Modifier
@@ -470,11 +472,7 @@ class MainActivity : ComponentActivity() {
                                 if (index < profiles.size - 1) {
                                     pendingResolverUrl = profiles[index].url
                                     pendingBootstrapDns = profiles[index].bootstrap
-                                    // Trigger immediate update for profile click (no debounce needed ideally, but debounce handles it)
-                                } else {
-                                    // If Custom selected, keep current pending values
                                 }
-                                // We rely on the LaunchedEffect to save and update service
                             },
                             onUrlChange = { pendingResolverUrl = it },
                             onBootstrapChange = { pendingBootstrapDns = it },
@@ -530,7 +528,6 @@ class MainActivity : ComponentActivity() {
             // Main Settings Card
             val cardShape = RoundedCornerShape(32.dp)
             val borderColor = MaterialTheme.colorScheme.primary
-            val inactiveColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
 
             ElevatedCard(
                 modifier = Modifier
@@ -542,14 +539,12 @@ class MainActivity : ComponentActivity() {
                         
                         val strokeWidth = 2.dp.toPx()
                         
-                        // 1. Static "tube" background (Always visible)
                         drawPath(
                             path = path,
                             color = borderColor.copy(alpha = 0.15f),
                             style = Stroke(width = strokeWidth)
                         )
 
-                        // 2. Rotating walking light segment (Always active)
                         val shader = SweepGradient(
                             size.center.x, size.center.y,
                             intArrayOf(
@@ -621,11 +616,11 @@ class MainActivity : ComponentActivity() {
                         OutlinedTextField(
                             value = resolverUrl,
                             onValueChange = onUrlChange,
-                            label = { Text("Resolver Endpoint") },
+                            label = { Text("ODoH Target & Proxy URLs") },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
                             singleLine = true,
-                            enabled = selectedProfileIndex == profiles.size - 1 || profiles[selectedProfileIndex].url.isEmpty()
+                            enabled = selectedProfileIndex == profiles.size - 1
                         )
                         
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -646,11 +641,12 @@ class MainActivity : ComponentActivity() {
                                 shape = RoundedCornerShape(16.dp),
                                 singleLine = true
                             )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        }
+                }
+            }
+        }
+    }
+
     @Composable
     fun LogScreen(logs: Array<String>) {
         val context = LocalContext.current
@@ -725,7 +721,7 @@ class MainActivity : ComponentActivity() {
     private fun saveLogsToFile(context: android.content.Context, logs: Array<String>) {
         if (logs.isEmpty()) return
         try {
-            val fileName = "SafeDNS_Logs_${System.currentTimeMillis()}.txt"
+            val fileName = "OxidOH_Logs_${System.currentTimeMillis()}.txt"
             val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
             val file = java.io.File(downloadsDir, fileName)
             java.io.FileOutputStream(file).use { out ->
@@ -734,7 +730,7 @@ class MainActivity : ComponentActivity() {
             android.media.MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
             android.widget.Toast.makeText(context, "Saved to Downloads", android.widget.Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            Log.e("SafeDNS", "Failed to save logs", e)
+            Log.e("OxidOH", "Failed to save logs", e)
         }
     }
 
@@ -907,10 +903,8 @@ class MainActivity : ComponentActivity() {
             Box(contentAlignment = Alignment.Center) {
                 val color = if (isRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
                 
-                // Outer static ring - made more visible when inactive
                 Box(Modifier.size(240.dp).clip(CircleShape).background(color.copy(alpha = if (isRunning) 0.03f else 0.1f)))
                 
-                // Animated pulse and rotating ring
                 if (isRunning) {
                     val infiniteTransition = rememberInfiniteTransition()
                     val rotation by infiniteTransition.animateFloat(
@@ -938,7 +932,6 @@ class MainActivity : ComponentActivity() {
                         )
                     )
 
-                    // Rotating Glow Ring
                     Box(
                         Modifier
                             .size(190.dp)
@@ -952,7 +945,6 @@ class MainActivity : ComponentActivity() {
                             )
                     )
 
-                    // Organic Pulse 1
                     Box(
                         Modifier
                             .size(160.dp)
@@ -975,13 +967,12 @@ class MainActivity : ComponentActivity() {
                         onToggle()
                     },
                     shape = CircleShape,
-                    // Made inactive surface more visible
                     color = if (isRunning) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
                     modifier = Modifier
                         .size(140.dp)
                         .scale(scale)
                         .shadow(if (isRunning) 12.dp else 0.dp, CircleShape)
-                        .border(if (isRunning) 0.dp else 2.dp, color.copy(alpha = 0.5f), CircleShape) // Add border when inactive
+                        .border(if (isRunning) 0.dp else 2.dp, color.copy(alpha = 0.5f), CircleShape)
                 ) {
                     val innerTransition = rememberInfiniteTransition()
                     val scanPos by innerTransition.animateFloat(
@@ -1020,7 +1011,6 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     ) {
-                        // Background Shield - increased alpha for inactive state
                         Icon(
                             imageVector = Icons.Default.Shield,
                             contentDescription = null,
@@ -1029,7 +1019,6 @@ class MainActivity : ComponentActivity() {
                         )
                         
                         if (isRunning) {
-                            // Pulsing Lock Icon
                             Icon(
                                 imageVector = Icons.Default.Lock,
                                 contentDescription = null,
@@ -1037,7 +1026,6 @@ class MainActivity : ComponentActivity() {
                                 tint = MaterialTheme.colorScheme.primary
                             )
                             
-                            // Orbital Dot
                             val orbitRotation by innerTransition.animateFloat(
                                 initialValue = 0f,
                                 targetValue = 360f,
@@ -1076,7 +1064,6 @@ class MainActivity : ComponentActivity() {
 
             Spacer(modifier = Modifier.height(12.dp))
             
-            // Helpful hint moved below status
             Text(
                 if (isRunning) "TAP SHIELD TO DISCONNECT" else "TAP SHIELD TO CONNECT", 
                 style = MaterialTheme.typography.labelSmall,
@@ -1095,7 +1082,7 @@ class MainActivity : ComponentActivity() {
 
         AlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("About SafeDNS") },
+            title = { Text("About OxidOH") },
             text = {
                 Column {
                     Text("Version: v0.1.0", fontWeight = FontWeight.Bold)
@@ -1149,7 +1136,6 @@ class MainActivity : ComponentActivity() {
 
                 if (connection.responseCode == 200) {
                     val response = connection.inputStream.bufferedReader().use { it.readText() }
-                    // Simple JSON parsing for tag_name
                     val tagName = response.substringAfter("\"tag_name\":\"").substringBefore("\"")
                     
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {

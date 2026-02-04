@@ -1,4 +1,4 @@
-package io.github.oxidoh.ui.theme
+package io.github.sms1sis.oxidoh.ui.theme
 
 import android.app.Activity
 import android.os.Build

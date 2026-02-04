@@ -1,4 +1,4 @@
-package io.github.oxidoh
+package io.github.sms1sis.oxidoh
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -33,7 +33,7 @@ class ProxyService : VpnService() {
     companion object {
         const val CHANNEL_ID = "ProxyServiceChannel"
         const val NOTIFICATION_ID = 1
-        private const val TAG = "ProxyService"
+        private const val TAG = "OxidOH"
 
         @Volatile
         var isProxyRunning = false
@@ -45,6 +45,16 @@ class ProxyService : VpnService() {
         external fun getLogs(): Array<String>
         @JvmStatic
         external fun clearCache()
+
+        @JvmStatic
+        fun nativeLog(level: String, tag: String, message: String) {
+            when (level) {
+                "ERROR" -> Log.e(tag, message)
+                "WARN" -> Log.w(tag, message)
+                "INFO" -> Log.i(tag, message)
+                else -> Log.d(tag, message)
+            }
+        }
 
         init {
             System.loadLibrary("oxidoh")
@@ -86,8 +96,8 @@ class ProxyService : VpnService() {
             ?: prefs.getString("listen_port", "5053")?.toIntOrNull() ?: 5053
         
         val resolverUrl = intent?.getStringExtra("resolverUrl") 
-            ?: prefs.getString("resolver_url", "https://cloudflare-dns.com/dns-query") ?: "https://cloudflare-dns.com/dns-query"
-        
+            ?: prefs.getString("resolver_url", "https://odoh.cloudflare-dns.com/dns-query") ?: "https://odoh.cloudflare-dns.com/dns-query"
+
         val bootstrapDns = intent?.getStringExtra("bootstrapDns")
             ?: prefs.getString("bootstrap_dns", "1.1.1.1") ?: "1.1.1.1"
 
@@ -106,7 +116,7 @@ class ProxyService : VpnService() {
         val heartbeatInterval = intent?.getLongExtra("heartbeatInterval", -1L).takeIf { it != null && it != -1L }
             ?: prefs.getString("heartbeat_interval", "10")?.toLongOrNull() ?: 10L
 
-        Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl, heartbeat=$heartbeatEnabled")
+        Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl")
 
         if (vpnInterface != null) {
             val configChanged = runningPort != listenPort || runningUrl != resolverUrl || runningBootstrap != bootstrapDns || runningCacheTtl != cacheTtl
@@ -122,7 +132,7 @@ class ProxyService : VpnService() {
                 
                 thread {
                     try { Thread.sleep(1000) } catch (e: InterruptedException) {}
-                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort with TTL $cacheTtl")
+                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort")
                     val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl)
                     Log.d(TAG, "Backend proxy initialized (result: $res)")
                     
@@ -149,13 +159,13 @@ class ProxyService : VpnService() {
         runningCacheTtl = cacheTtl
 
         thread {
-            Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort with TTL $cacheTtl")
+            Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
             startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl)
         }
 
         try {
             vpnInterface = Builder()
-                .setSession("SafeDNS")
+                .setSession("OxidOH")
                 .addAddress("10.0.0.1", 32)
                 .addDnsServer("10.0.0.2") // Virtual DNS IP
                 .addRoute("10.0.0.2", 32) // Route only the virtual DNS IP
@@ -391,8 +401,8 @@ class ProxyService : VpnService() {
         )
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("SafeDNS Active")
-            .setContentText("Protecting DNS queries")
+            .setContentTitle("OxidOH Active")
+            .setContentText("Protecting DNS queries (ODoH)")
             .setSmallIcon(R.drawable.ic_stat_shield) // Custom monochrome shield icon
             .setLargeIcon(android.graphics.BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)) // App icon for drawer
             .setContentIntent(pendingIntent)
@@ -421,7 +431,7 @@ class ProxyService : VpnService() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(NotificationChannel(CHANNEL_ID, "SafeDNS", NotificationManager.IMPORTANCE_LOW))
+            manager?.createNotificationChannel(NotificationChannel(CHANNEL_ID, "OxidOH", NotificationManager.IMPORTANCE_LOW))
         }
     }
 }

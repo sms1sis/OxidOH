@@ -8,14 +8,14 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["rustls-tls", "socks", "http2"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "socks", "http2", "gzip", "deflate"], default-features = false }
 hickory-resolver = "0.25" # Formerly trust-dns
 odoh-rs = "1.0"
 dnsstamps = "0.1"
 anyhow = "1"
 bytes = "1"
 jni = { version = "0.21", optional = true }
-android_logger = "0.13"
+android_logger = "0.15"
 log = "0.4"
 base64 = "0.21"
 rand = "0.9"
@@ -27,6 +27,9 @@ moka = { version = "0.12", features = ["future"] }
 rustls-platform-verifier = { version = "0.6", features = ["jni"] }
 tracing = "0.1.44"
 getrandom = "0.2"
+clap = { version = "4.5.57", features = ["derive"] }
+tracing-subscriber = "0.3.22"
+regex = "1.12.3"
 
 
 

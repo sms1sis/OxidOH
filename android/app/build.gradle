@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "io.github.oxidoh"
+    namespace = "io.github.sms1sis.oxidoh"
     compileSdk 36
 
     defaultConfig {
-        applicationId "io.github.oxidoh"
+        applicationId "io.github.sms1sis.oxidoh"
         minSdk 23
         targetSdk 36
         versionCode 1

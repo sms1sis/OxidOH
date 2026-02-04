@@ -1,3 +1,5 @@
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::net::{SocketAddr, IpAddr};
 use anyhow::{Result, Context};
 use tokio::net::{UdpSocket, TcpListener};
@@ -5,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use reqwest::{Client, Url};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, mpsc};
-use tracing::{info, error, debug}; // Add tracing import
+use tracing::{info, error, debug};
 
 use std::time::Duration;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,10 +15,12 @@ use std::collections::{VecDeque, HashMap};
 use std::sync::LazyLock;
 use bytes::Bytes;
 use moka::future::Cache;
-use odoh_rs::{ObliviousDoHConfig, ObliviousDoHConfigs, ObliviousDoHMessage, ObliviousDoHMessagePlaintext, ObliviousDoHConfigContents, encrypt_query, decrypt_response, parse, compose}; // Corrected odoh_rs imports, added compose
+use odoh_rs::{ObliviousDoHConfig, ObliviousDoHConfigs, ObliviousDoHMessage, ObliviousDoHMessagePlaintext, ObliviousDoHConfigContents, encrypt_query, decrypt_response, parse, compose};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use std::io::Cursor; // For parsing
+use std::io::Cursor;
+use jni::JavaVM;
+use jni::objects::JClass;
 
 pub struct Stats {
     pub queries_udp: AtomicUsize,
@@ -45,8 +49,61 @@ static LOG_SENDER: LazyLock<mpsc::UnboundedSender<LogMessage>> = LazyLock::new(|
     tx
 });
 
-#[cfg(feature = "jni")]
-static GLOBAL_STATS: LazyLock<RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| RwLock::new(None));
+struct NativeLog {
+    level: String,
+    msg: String,
+}
+
+static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock::new(|| {
+    let (tx, mut rx) = mpsc::unbounded_channel::<NativeLog>();
+    
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            while let Some(log) = rx.recv().await {
+                // Fallback to standard android logcat
+                match log.level.as_str() {
+                    "ERROR" => log::error!(target: "OxidOH-Native", "{}", log.msg),
+                    "WARN" => log::warn!(target: "OxidOH-Native", "{}", log.msg),
+                    "INFO" => log::info!(target: "OxidOH-Native", "{}", log.msg),
+                    _ => log::debug!(target: "OxidOH-Native", "{}", log.msg),
+                }
+
+                if let Ok(jvm_lock) = JVM.read() {
+                    if let Some(jvm) = jvm_lock.as_ref() {
+                        if let Ok(class_lock) = PROXY_SERVICE_CLASS.read() {
+                            if let Some(class_ref) = class_lock.as_ref() {
+                                if let Ok(mut env) = jvm.attach_current_thread() {
+                                    if let Ok(level_j) = env.new_string(&log.level) {
+                                        if let Ok(tag_j) = env.new_string("OxidOH-Native") {
+                                            if let Ok(msg_j) = env.new_string(&log.msg) {
+                                                let _ = env.call_static_method(
+                                                    class_ref,
+                                                    "nativeLog",
+                                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                                                    &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    });
+    tx
+});
+
+fn native_log(level: &str, msg: &str) {
+    let _ = NATIVE_LOG_SENDER.send(NativeLog {
+        level: level.to_string(),
+        msg: msg.to_string(),
+    });
+}
+
 #[cfg(feature = "jni")]
 static GLOBAL_CACHE: LazyLock<RwLock<Option<DnsCache>>> = LazyLock::new(|| RwLock::new(None));
 
@@ -76,7 +133,8 @@ pub struct Config {
     pub polling_interval: u64,
     pub force_ipv4: bool,
     pub allow_ipv6: bool,
-    pub resolver_url: String, // ODoH Target URL
+    pub odoh_target_url: String, 
+    pub odoh_proxy_url: Option<String>,
     pub proxy_server: Option<String>,
     pub source_addr: Option<String>,
     pub http11: bool,
@@ -116,25 +174,28 @@ impl Resolve for DynamicResolver {
         Box::pin(async move {
             let hosts = hosts.read().await;
             if let Some(addrs) = hosts.get(&name_str) {
+                native_log("DEBUG", &format!("DynamicResolver: resolved {} to {:?}", name_str, addrs));
                 Ok(Box::new(addrs.clone().into_iter()) as Addrs)
             } else {
+                native_log("WARN", &format!("DynamicResolver: resolution failed for {}", name_str));
                 Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Host not found")) as Box<dyn std::error::Error + Send + Sync>)
             }
         })
     }
 }
 
-// Global ODoH Config Cache
-static ODOH_CONFIG: LazyLock<RwLock<Option<ObliviousDoHConfig>>> = LazyLock::new(|| RwLock::new(None));
+static ODOH_CONFIG: LazyLock<std::sync::RwLock<Option<ObliviousDoHConfig>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+static JVM: LazyLock<std::sync::RwLock<Option<JavaVM>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::GlobalRef>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.listen_addr, config.listen_port)
         .parse()
         .context("Failed to parse listen address")?;
 
-    let resolver_url_parsed = Url::parse(&config.resolver_url)
-        .context("Failed to parse resolver URL")?;
-    let resolver_domain = resolver_url_parsed.domain().context("Resolver URL must have a domain")?.to_string();
+    let target_url_parsed = Url::parse(&config.odoh_target_url)
+        .context("Failed to parse target URL")?;
+    let target_domain = target_url_parsed.domain().context("Target URL must have a domain")?.to_string();
 
     let mut udp_socket = None;
     let mut tcp_listener = None;
@@ -158,29 +219,46 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let udp_socket = udp_socket.context("Failed to bind UDP")?;
     let tcp_listener = tcp_listener.context("Failed to bind TCP")?;
 
-    info!("Listening on {} -> ODoH Target {}", addr, config.resolver_url);
+    native_log("INFO", &format!("Listening on {} -> ODoH Target {}", addr, config.odoh_target_url));
 
-    let ip = resolve_bootstrap(&resolver_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
-    info!("Bootstrapped {} to {}", resolver_domain, ip);
+    let ip = resolve_bootstrap(&target_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
+    let ip_with_port = SocketAddr::new(ip.ip(), 443);
+    native_log("INFO", &format!("Bootstrapped Target {} to {}", target_domain, ip_with_port));
     
     let dynamic_resolver = DynamicResolver::new();
-    dynamic_resolver.update(resolver_domain.clone(), ip).await;
+    dynamic_resolver.update(target_domain.clone(), ip_with_port).await;
+
+    if let Some(proxy_url) = &config.odoh_proxy_url {
+        let proxy_url_parsed = Url::parse(proxy_url).context("Failed to parse ODoH Proxy URL")?;
+        let proxy_domain = proxy_url_parsed.domain().context("Proxy URL must have a domain")?.to_string();
+        let proxy_ip = resolve_bootstrap(&proxy_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
+        let proxy_ip_with_port = SocketAddr::new(proxy_ip.ip(), 443);
+        native_log("INFO", &format!("Bootstrapped Proxy {} to {}", proxy_domain, proxy_ip_with_port));
+        dynamic_resolver.update(proxy_domain, proxy_ip_with_port).await;
+    }
+
+    // Also bootstrap one.one.one.one just in case Cloudflare Target uses it internally
+    if let Ok(ip) = "1.1.1.1".parse::<IpAddr>() {
+        dynamic_resolver.update("one.one.one.one".to_string(), SocketAddr::new(ip, 443)).await;
+    }
 
     let client = create_client(&config, Arc::new(dynamic_resolver))?;
     
-    // Fetch ODoH Config
-    match fetch_odoh_config(&client, &config.resolver_url).await {
+    match fetch_odoh_config(&client, &config.odoh_target_url).await {
         Ok(c) => {
-            let mut w = ODOH_CONFIG.write().await;
-            *w = Some(c);
-            info!("Fetched ODoH Config successfully");
+            if let Ok(mut w) = ODOH_CONFIG.write() {
+                *w = Some(c);
+                native_log("INFO", "Fetched ODoH Config successfully");
+            }
         }
         Err(e) => {
-            error!("Failed to fetch ODoH Config: {}", e);
+            native_log("ERROR", &format!("Failed to fetch ODoH Config: {:?}. Proxy will likely fail.", e));
         }
     }
 
-    let resolver_url_str = Arc::new(config.resolver_url.clone());
+    let send_url = config.odoh_proxy_url.clone().unwrap_or_else(|| config.odoh_target_url.clone());
+    let send_url_str = Arc::new(send_url);
+    
     let cache: DnsCache = Cache::builder().max_capacity(2048).build();
 
     #[cfg(feature = "jni")]
@@ -189,10 +267,12 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         *w = Some(cache.clone());
     }
 
+    native_log("INFO", "Starting proxy loops");
+
     let udp_loop = {
         let socket = udp_socket.clone();
         let client = client.clone();
-        let resolver_url = resolver_url_str.clone();
+        let resolver_url = send_url_str.clone();
         let stats = stats.clone();
         let cache = cache.clone();
         tokio::spawn(async move {
@@ -222,7 +302,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let tcp_loop = {
          let listener = tcp_listener;
          let client = client.clone();
-         let resolver_url = resolver_url_str.clone();
+         let resolver_url = send_url_str.clone();
          let stats = stats.clone();
          let cache = cache.clone();
          tokio::spawn(async move {
@@ -257,22 +337,68 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 }
 
 async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<ObliviousDoHConfig> {
-    let config_url = if target_url.ends_with('/') {
+    let parsed = Url::parse(target_url).context("Invalid target URL")?;
+    let host = parsed.host_str().context("Target URL must have a host")?;
+    let scheme = parsed.scheme();
+    
+    // Path 1: RFC 9230 standard path
+    let config_url_1 = format!("{}://{}/.well-known/odohconfigs", scheme, host);
+    // Path 2: Common fallback (some providers put it under the endpoint)
+    let config_url_2 = if target_url.ends_with('/') {
         format!("{}.well-known/odohconfigs", target_url)
     } else {
         format!("{}/.well-known/odohconfigs", target_url)
     };
 
-    let resp = client.get(&config_url).send().await?;
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("Failed to get odohconfigs: {}", resp.status()));
+    let urls = vec![config_url_1, config_url_2];
+    let mut last_err = anyhow::anyhow!("No config paths tried");
+
+    for url in urls {
+        native_log("DEBUG", &format!("Trying odohconfigs from {}", url));
+        let resp = client.get(&url)
+            .header("User-Agent", "dnscrypt-proxy")
+            .header("Accept", "application/oblivious-dns-message-config, application/octet-stream, application/binary, */*")
+            .header("Cache-Control", "no-cache, max-age=0")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                if r.status().is_success() {
+                    let bytes = r.bytes().await?;
+                    native_log("DEBUG", &format!("Fetched {} bytes from {}", bytes.len(), url));
+                    let mut cursor = Cursor::new(bytes); 
+                    match parse::<ObliviousDoHConfigs, _>(&mut cursor) {
+                        Ok(configs) => {
+                            if let Some(config) = configs.supported().into_iter().next() {
+                                native_log("INFO", &format!("Successfully fetched ODoH config from {}", url));
+                                return Ok(config);
+                            } else {
+                                native_log("WARN", &format!("No supported ODoH configs found at {}", url));
+                                last_err = anyhow::anyhow!("No supported ODoH configs found at {}", url);
+                            }
+                        }
+                        Err(e) => {
+                            native_log("WARN", &format!("Failed to parse ODoH configs from {}: {:?}", url, e));
+                            last_err = anyhow::anyhow!("Failed to parse ODoH configs from {}: {:?}", url, e);
+                        }
+                    }
+                } else {
+                    let status = r.status();
+                    let body = r.text().await.unwrap_or_default();
+                    native_log("WARN", &format!("Failed path {}: {} - Body: {}", url, status, body));
+                    last_err = anyhow::anyhow!("Failed to get odohconfigs from {}: {} - Body: {}", url, status, body);
+                }
+            }
+            Err(e) => {
+                native_log("WARN", &format!("Error reaching {}: {:?}", url, e));
+                last_err = e.into();
+            }
+        }
     }
-    let bytes = resp.bytes().await?;
     
-    let mut cursor = Cursor::new(bytes); // Use Cursor for parsing
-    let configs: ObliviousDoHConfigs = parse(&mut cursor)?; // Parse into ObliviousDoHConfigs
-    let config = configs.supported().into_iter().next().ok_or_else(|| anyhow::anyhow!("No supported ODoH config found"))?;
-    Ok(config)
+    Err(last_err)
 }
 
 async fn handle_query(
@@ -299,47 +425,65 @@ async fn handle_query(
         }
     }
 
-    let config_lock = ODOH_CONFIG.read().await;
-    let odoh_config = config_lock.as_ref().ok_or_else(|| anyhow::anyhow!("No ODoH Config available"))?;
+    let odoh_config = {
+        let lock = ODOH_CONFIG.read().map_err(|_| anyhow::anyhow!("Lock error"))?;
+        lock.as_ref().ok_or_else(|| anyhow::anyhow!("No ODoH Config available"))?.clone()
+    };
     
     let mut seed_bytes = [0u8; 32];
     getrandom::getrandom(&mut seed_bytes).unwrap();
     let mut rng = StdRng::from_seed(seed_bytes);
     
-    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, 0); // Convert raw DNS message to ODoH plaintext
-    let config_contents: ObliviousDoHConfigContents = odoh_config.clone().into();
-    let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?; // Fixed: use .clone().into() for config contents
+    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, 0); 
+    let config_contents: ObliviousDoHConfigContents = odoh_config.into();
+    let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?; 
     
-    let req_bytes = compose(&encrypted_query_msg)?.freeze(); // Use compose to serialize ObliviousDoHMessage
+    let req_bytes = compose(&encrypted_query_msg)?.freeze(); 
 
     let start = std::time::Instant::now();
+    native_log("DEBUG", &format!("Sending ODoH query for {} to {}", domain, resolver_url));
     
-    let resp = client.post(&*resolver_url)
+    let mut resp = client.post(&*resolver_url)
         .header("content-type", "application/oblivious-dns-message")
         .header("accept", "application/oblivious-dns-message")
-        .body(req_bytes)
+        .body(req_bytes.clone())
         .send()
         .await;
+
+    // Fallback to GET if POST is not implemented (501)
+    if let Ok(ref r) = resp {
+        if r.status() == reqwest::StatusCode::NOT_IMPLEMENTED {
+            native_log("WARN", &format!("POST failed with 501 for {}, retrying with GET", domain));
+            let b64_query = URL_SAFE_NO_PAD.encode(&req_bytes);
+            let mut get_url = Url::parse(&*resolver_url)?;
+            get_url.query_pairs_mut().append_pair("dns", &b64_query);
+            
+            resp = client.get(get_url)
+                .header("accept", "application/oblivious-dns-message")
+                .send()
+                .await;
+        }
+    }
 
     match resp {
         Ok(r) => {
             if !r.status().is_success() {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
-                add_query_log(domain, format!("Error {}", r.status()));
+                add_query_log(domain.clone(), format!("Error {}", r.status()));
                 return Err(anyhow::anyhow!("HTTP Error {}", r.status()));
             }
             let resp_bytes = r.bytes().await?;
             let mut response_cursor = Cursor::new(resp_bytes);
-            let odoh_response: ObliviousDoHMessage = parse(&mut response_cursor)?; // Parse into ObliviousDoHMessage
+            let odoh_response: ObliviousDoHMessage = parse(&mut response_cursor)?; 
 
             let dns_resp_plaintext = decrypt_response(&query_plaintext, &odoh_response, client_secret)?;
-            let dns_resp = dns_resp_plaintext.into_msg().to_vec(); // Access dns_msg field via into_msg()
+            let dns_resp = dns_resp_plaintext.into_msg().to_vec(); 
             
             let latency = start.elapsed().as_millis() as usize;
             LAST_LATENCY.store(latency, Ordering::Relaxed);
-            add_query_log(domain, format!("OK ({}ms)", latency));
+            add_query_log(domain.clone(), format!("OK ({}ms)", latency));
 
-             if data.len() > 2 && dns_resp.len() > 2 {
+            if data.len() > 2 && dns_resp.len() > 2 {
                 cache.insert(data.slice(2..), (Bytes::copy_from_slice(&dns_resp), 60)).await;
             }
             
@@ -347,7 +491,8 @@ async fn handle_query(
         }
         Err(e) => {
              stats.errors.fetch_add(1, Ordering::Relaxed);
-             add_query_log(domain, "Error".to_string());
+             add_query_log(domain.clone(), "Error".to_string());
+             native_log("ERROR", &format!("HTTP request failed for {}: {:?}", domain, e));
              Err(e.into())
         }
     }
@@ -426,7 +571,7 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
 }
 
 fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Client> {
-     let mut builder = Client::builder()
+    let mut builder = Client::builder()
         .dns_resolver(resolver)
         .use_rustls_tls() 
         .pool_idle_timeout(Duration::from_secs(config.max_idle_time))
@@ -440,14 +585,23 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
             builder = builder.local_address(ip);
         }
     }
-    Ok(builder.no_proxy().build()?)
+    let client = builder.no_proxy().build()?;
+    native_log("INFO", "HTTP Client created successfully");
+    Ok(client)
+}
+
+fn extract_urls(input: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"(https?|ftp|file)://[-A-Za-z0-9+&@#/%?=~_|!:,.;]+[-A-Za-z0-9+&@#/%=~_|]").unwrap();
+    re.find_iter(input)
+        .map(|m| m.as_str().to_string())
+        .collect()
 }
 
 #[cfg(feature = "jni")]
 pub mod jni_api {
     use super::*;
     use jni::JNIEnv;
-    use jni::objects::{JClass, JObject, JString};
+    use jni::objects::{JObject, JString};
     use jni::sys::jint;
     use tokio::runtime::Runtime;
     use tokio_util::sync::CancellationToken;
@@ -456,20 +610,38 @@ pub mod jni_api {
     static CANCELLATION_TOKEN: LazyLock<Mutex<Option<CancellationToken>>> = LazyLock::new(|| Mutex::new(None));
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_oxidoh_ProxyService_initLogger(
-        mut _env: JNIEnv,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_initLogger(
+        mut env: JNIEnv,
         _class: JClass,
         _context: JObject,
     ) {
          android_logger::init_once(
-            android_logger::Config::default().with_tag("OxidOH")
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Debug)
+                .with_tag("OxidOH")
          );
+         
+         if let Ok(jvm) = env.get_java_vm() {
+             if let Ok(mut w) = JVM.write() {
+                 *w = Some(jvm);
+             }
+         }
+
+         if let Ok(class) = env.find_class("io/github/sms1sis/oxidoh/ProxyService") {
+             if let Ok(global_ref) = env.new_global_ref(class) {
+                 if let Ok(mut w) = PROXY_SERVICE_CLASS.write() {
+                     *w = Some(global_ref);
+                 }
+             }
+         }
+
          #[cfg(target_os = "android")]
-         rustls_platform_verifier::android::init_hosted(&mut _env, _context).ok();
+         rustls_platform_verifier::android::init_hosted(&mut env, _context).ok();
+         native_log("INFO", "Logger, JVM and Global Class Ref initialized");
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_oxidoh_ProxyService_startProxy(
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_startProxy(
         mut env: JNIEnv,
         _class: JClass,
         listen_addr: JString,
@@ -480,13 +652,25 @@ pub mod jni_api {
         cache_ttl: jni::sys::jlong,
     ) -> jint {
         let listen_addr: String = env.get_string(&listen_addr).unwrap().into();
-        let resolver_url: String = env.get_string(&resolver_url).unwrap().into();
+        let resolver_url_input: String = env.get_string(&resolver_url).unwrap().into();
         let bootstrap_dns: String = env.get_string(&bootstrap_dns).unwrap().into();
         
+        let urls = extract_urls(&resolver_url_input);
+        if urls.is_empty() {
+            native_log("ERROR", "No valid URLs found in resolver input");
+            return -1;
+        }
+
+        let odoh_target_url = urls[0].clone();
+        let odoh_proxy_url = if urls.len() > 1 { Some(urls[1].clone()) } else { None };
+
+        native_log("INFO", &format!("startProxy: addr={}, port={}, target={}, proxy={:?}", listen_addr, listen_port, odoh_target_url, odoh_proxy_url));
+
         let config = Config {
             listen_addr,
             listen_port: listen_port as u16,
-            resolver_url,
+            odoh_target_url,
+            odoh_proxy_url,
             bootstrap_dns,
             allow_ipv6: allow_ipv6 != 0,
             tcp_client_limit: 20,
@@ -512,20 +696,27 @@ pub mod jni_api {
         
         let stats = Arc::new(Stats::new());
 
-        RUNTIME.spawn(async move {
+        let _handle = RUNTIME.spawn(async move {
+            native_log("INFO", "Proxy task started inside runtime");
             let (tx, rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 cloned_token.cancelled().await;
+                native_log("INFO", "Cancellation token triggered, sending shutdown signal");
                 let _ = tx.send(());
             });
-            let _ = run_proxy(config, stats, rx).await;
+            match run_proxy(config, stats, rx).await {
+                Ok(_) => native_log("INFO", "run_proxy exited gracefully"),
+                Err(e) => native_log("ERROR", &format!("run_proxy exited with error: {:?}", e)),
+            }
         });
+        
+        native_log("INFO", "Proxy task spawned");
 
         0
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_oxidoh_ProxyService_getLatency(
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getLatency(
         _env: JNIEnv,
         _class: JClass,
     ) -> jint {
@@ -533,7 +724,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_oxidoh_ProxyService_getLogs(
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getLogs(
         mut env: JNIEnv,
         _class: JClass,
     ) -> jni::sys::jobjectArray {
@@ -549,7 +740,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_oxidoh_ProxyService_stopProxy(
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_stopProxy(
         _env: JNIEnv,
         _class: JClass,
     ) {
@@ -560,7 +751,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_oxidoh_ProxyService_clearCache(
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearCache(
         _env: JNIEnv,
         _class: JClass,
     ) {

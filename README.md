@@ -54,7 +54,7 @@ This script will compile the Rust code for `aarch64-linux-android` (arm64-v8a) a
 
 The `liboxidoh.so` library exposes the same JNI functions as `https_dns_proxy_rust`. To integrate:
 
-1.  Ensure your Android project's `ProxyService.kt` (or equivalent) in the `io.github.oxidoh` package loads the `oxidoh` library:
+1.  Ensure your Android project's `ProxyService.kt` (or equivalent) in the `io.github.sms1sis.oxidoh` package loads the `oxidoh` library:
     ```java
     static {
         System.loadLibrary("oxidoh");
