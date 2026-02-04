@@ -1,0 +1,48 @@
+import groovy.json.JsonSlurper
+
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+def getRustlsPlatformVerifierPath() {
+    try {
+        def process = ["cargo", "metadata", "--format-version", "1", "--filter-platform", "aarch64-linux-android"].execute()
+        def stdout = new StringBuffer()
+        def stderr = new StringBuffer()
+        process.waitForProcessOutput(stdout, stderr)
+        
+        if (process.exitValue() != 0) {
+            println "Cargo metadata failed: $stderr"
+            return null
+        }
+
+        def json = new JsonSlurper().parseText(stdout.toString())
+        def pkg = json.packages.find { it.name == 'rustls-platform-verifier-android' }
+        if (pkg) {
+            return new File(pkg.manifest_path).parentFile.absolutePath + "/maven"
+        }
+    } catch (Exception e) {
+        println "Failed to resolve rustls-platform-verifier path: $e"
+    }
+    return null
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        def localMaven = getRustlsPlatformVerifierPath()
+        if (localMaven) {
+            maven {
+                url = localMaven
+            }
+        }
+    }
+}
+rootProject.name = "OxidOH"
+include ':app'
