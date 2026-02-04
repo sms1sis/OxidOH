@@ -262,10 +262,9 @@ class ProxyService : VpnService() {
                     if (version == 0x40 && data[9].toInt() == 17) { // IPv4 UDP
                         val ihl = (data[0].toInt() and 0x0F) * 4
                         val dPort = ((data[ihl + 2].toInt() and 0xFF) shl 8) or (data[ihl + 3].toInt() and 0xFF)
-                        if (dPort != 5053) { // Ignore local proxy traffic if it somehow leaks
-                             // Log.d(TAG, "IPv4 UDP packet: dPort=$dPort")
-                        }
-                        if (dPort == 53) {
+                        val dAddr = InetAddress.getByAddress(data.copyOfRange(ihl - 4, ihl))
+                        
+                        if (dPort == 53 || dAddr.hostAddress == "10.0.0.2") {
                             val dnsPayload = data.copyOfRange(ihl + 8, length)
                             udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
                             val recvBuf = ByteArray(4096)
@@ -403,8 +402,8 @@ class ProxyService : VpnService() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("OxidOH Active")
             .setContentText("Protecting DNS queries (ODoH)")
-            .setSmallIcon(R.drawable.ic_stat_shield) // Custom monochrome shield icon
-            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)) // App icon for drawer
+            .setSmallIcon(R.drawable.ic_stat_shield)
+            .setLargeIcon(android.graphics.BitmapFactory.decodeResource(resources, R.drawable.ic_stat_shield))
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()

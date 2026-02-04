@@ -1344,6 +1344,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rustls-platform-verifier",
+ "socket2 0.6.2",
  "tokio",
  "tokio-util",
  "tracing",

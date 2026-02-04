@@ -159,11 +159,8 @@ class MainActivity : ComponentActivity() {
 
         val profiles = listOf(
             DnsProfile("Cloudflare Direct", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1"),
-            DnsProfile("Cloudflare via Surfly", "https://odoh.cloudflare-dns.com/dns-query https://odoh1.surfly.com/proxy", "1.1.1.1"),
-            DnsProfile("Cloudflare via Apple", "https://odoh.cloudflare-dns.com/dns-query https://odoh.apple.com/proxy", "1.1.1.1"),
-            DnsProfile("IANA via Surfly", "https://odoh.iana.org/dns-query https://odoh1.surfly.com/proxy", "192.0.43.10"),
-            DnsProfile("IANA via Apple", "https://odoh.iana.org/dns-query https://odoh.apple.com/proxy", "192.0.43.10"),
-            DnsProfile("PCCW via Surfly", "https://odoh.pccwglobal.com/dns-query https://odoh1.surfly.com/proxy", "1.1.1.1"),
+            DnsProfile("Cloudflare via Tiarap", "https://odoh.cloudflare-dns.com/dns-query https://odoh-jp.tiarap.org/proxy", "172.67.140.94,1.1.1.1"),
+            DnsProfile("Crypto.sx Direct", "https://odoh.crypto.sx/dns-query", "104.21.46.152,1.1.1.1"),
             DnsProfile("Custom ODoH", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1")
         )
         

@@ -200,18 +200,36 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let mut udp_socket = None;
     let mut tcp_listener = None;
     for i in 0..5 {
-        match UdpSocket::bind(addr).await {
-            Ok(s) => {
-                match TcpListener::bind(addr).await {
-                    Ok(l) => {
-                        udp_socket = Some(Arc::new(s));
-                        tcp_listener = Some(l);
-                        break;
-                    }
-                    Err(e) => { error!("Failed to bind TCP ({}): {}", i, e); }
-                }
+        use socket2::{Socket, Domain, Type, Protocol};
+        
+        let bind_res = (|| -> Result<(UdpSocket, TcpListener)> {
+            let udp_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+            udp_sock.set_reuse_address(true)?;
+            #[cfg(not(windows))]
+            udp_sock.set_reuse_port(true)?;
+            udp_sock.bind(&addr.into())?;
+            let udp_std: std::net::UdpSocket = udp_sock.into();
+            
+            let tcp_sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+            tcp_sock.set_reuse_address(true)?;
+            #[cfg(not(windows))]
+            tcp_sock.set_reuse_port(true)?;
+            tcp_sock.bind(&addr.into())?;
+            tcp_sock.listen(128)?;
+            let tcp_std: std::net::TcpListener = tcp_sock.into();
+
+            Ok((UdpSocket::from_std(udp_std)?, TcpListener::from_std(tcp_std)?))
+        })();
+
+        match bind_res {
+            Ok((s, l)) => {
+                udp_socket = Some(Arc::new(s));
+                tcp_listener = Some(l);
+                break;
             }
-            Err(e) => { error!("Failed to bind UDP ({}): {}", i, e); }
+            Err(e) => { 
+                native_log("WARN", &format!("Failed to bind (attempt {}): {}", i, e));
+            }
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -244,15 +262,29 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     let client = create_client(&config, Arc::new(dynamic_resolver))?;
     
-    match fetch_odoh_config(&client, &config.odoh_target_url).await {
-        Ok(c) => {
-            if let Ok(mut w) = ODOH_CONFIG.write() {
-                *w = Some(c);
+    let mut fetched_config = None;
+    for attempt in 1..=5 {
+        native_log("INFO", &format!("Fetching ODoH config from {} (Attempt {}/5)", config.odoh_target_url, attempt));
+        match fetch_odoh_config(&client, &config.odoh_target_url).await {
+            Ok(c) => {
+                fetched_config = Some(c);
                 native_log("INFO", "Fetched ODoH Config successfully");
+                break;
+            }
+            Err(e) => {
+                if attempt < 5 {
+                    native_log("WARN", &format!("Failed to fetch ODoH Config (Attempt {}): {:?}. Retrying in 2s...", attempt, e));
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                } else {
+                    native_log("ERROR", &format!("Failed to fetch ODoH Config after 5 attempts: {:?}. Proxy will likely fail.", e));
+                }
             }
         }
-        Err(e) => {
-            native_log("ERROR", &format!("Failed to fetch ODoH Config: {:?}. Proxy will likely fail.", e));
+    }
+
+    if let Some(c) = fetched_config {
+        if let Ok(mut w) = ODOH_CONFIG.write() {
+            *w = Some(c);
         }
     }
 
@@ -351,63 +383,66 @@ async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<Obliviou
     let host = parsed.host_str().context("Target URL must have a host")?;
     let scheme = parsed.scheme();
     
-    // Path 1: RFC 9230 standard path
-    let config_url_1 = format!("{}://{}/.well-known/odohconfigs", scheme, host);
-    // Path 2: Common fallback (some providers put it under the endpoint)
-    let config_url_2 = if target_url.ends_with('/') {
-        format!("{}.well-known/odohconfigs", target_url)
-    } else {
-        format!("{}/.well-known/odohconfigs", target_url)
-    };
+    // Multiple standard and fallback paths
+    let urls = vec![
+        format!("{}://{}/.well-known/odohconfigs", scheme, host),
+        format!("{}://{}/odohconfigs", scheme, host),
+        if target_url.ends_with('/') { format!("{}.well-known/odohconfigs", target_url) } else { format!("{}/.well-known/odohconfigs", target_url) },
+        target_url.to_string(),
+    ];
 
-    let urls = vec![config_url_1, config_url_2];
     let mut last_err = anyhow::anyhow!("No config paths tried");
 
     for url in urls {
-        native_log("DEBUG", &format!("Trying odohconfigs from {}", url));
-        let resp = client.get(&url)
-            .header("User-Agent", "dnscrypt-proxy")
-            .header("Accept", "application/oblivious-dns-message-config, application/octet-stream, application/binary, */*")
-            .header("Cache-Control", "no-cache, max-age=0")
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await;
+        for attempt in 0..2 {
+            let ua = if attempt == 0 { "dnscrypt-proxy" } else { "oxidoh/0.1.0" };
+            native_log("DEBUG", &format!("Trying odohconfigs from {} (UA: {})", url, ua));
+            
+            let resp = client.get(&url)
+                .header("User-Agent", ua)
+                .header("Accept", "application/oblivious-dns-message-config, application/octet-stream, application/binary, */*")
+                .header("Cache-Control", "no-cache, max-age=0")
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await;
 
-        match resp {
-            Ok(r) => {
-                if r.status().is_success() {
-                    let bytes = r.bytes().await?;
-                    native_log("DEBUG", &format!("Fetched {} bytes from {}", bytes.len(), url));
-                    let mut cursor = Cursor::new(bytes); 
-                    match parse::<ObliviousDoHConfigs, _>(&mut cursor) {
-                        Ok(configs) => {
-                            if let Some(config) = configs.supported().into_iter().next() {
-                                native_log("INFO", &format!("Successfully fetched ODoH config from {}", url));
-                                return Ok(config);
-                            } else {
-                                native_log("WARN", &format!("No supported ODoH configs found at {}", url));
-                                last_err = anyhow::anyhow!("No supported ODoH configs found at {}", url);
+            match resp {
+                Ok(r) => {
+                    if r.status().is_success() {
+                        let bytes = r.bytes().await?;
+                        if bytes.is_empty() {
+                            last_err = anyhow::anyhow!("Empty config from {}", url);
+                            continue;
+                        }
+                        native_log("DEBUG", &format!("Fetched {} bytes from {}", bytes.len(), url));
+                        let mut cursor = Cursor::new(bytes); 
+                        match parse::<ObliviousDoHConfigs, _>(&mut cursor) {
+                            Ok(configs) => {
+                                if let Some(config) = configs.supported().into_iter().next() {
+                                    native_log("INFO", &format!("Successfully fetched ODoH config from {}", url));
+                                    return Ok(config);
+                                }
+                            }
+                            Err(_) => {
+                                // Try parsing as single config if multiple failed
+                                let mut cursor2 = Cursor::new(cursor.into_inner());
+                                if let Ok(config) = parse::<ObliviousDoHConfig, _>(&mut cursor2) {
+                                    native_log("INFO", &format!("Successfully fetched single ODoH config from {}", url));
+                                    return Ok(config);
+                                }
                             }
                         }
-                        Err(e) => {
-                            native_log("WARN", &format!("Failed to parse ODoH configs from {}: {:?}", url, e));
-                            last_err = anyhow::anyhow!("Failed to parse ODoH configs from {}: {:?}", url, e);
-                        }
+                    } else {
+                        native_log("WARN", &format!("Failed path {}: {}", url, r.status()));
                     }
-                } else {
-                    let status = r.status();
-                    let body = r.text().await.unwrap_or_default();
-                    native_log("WARN", &format!("Failed path {}: {} - Body: {}", url, status, body));
-                    last_err = anyhow::anyhow!("Failed to get odohconfigs from {}: {} - Body: {}", url, status, body);
                 }
-            }
-            Err(e) => {
-                native_log("WARN", &format!("Error reaching {}: {:?}", url, e));
-                last_err = e.into();
+                Err(e) => {
+                    native_log("WARN", &format!("Error reaching {}: {:?}", url, e));
+                    last_err = e.into();
+                }
             }
         }
     }
-    
     Err(last_err)
 }
 
@@ -437,7 +472,13 @@ async fn handle_query(
 
     let odoh_config = {
         let lock = ODOH_CONFIG.read().map_err(|_| anyhow::anyhow!("Lock error"))?;
-        lock.as_ref().ok_or_else(|| anyhow::anyhow!("No ODoH Config available"))?.clone()
+        match lock.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                add_query_log(domain, "Error (No ODoH Config)".to_string());
+                return Err(anyhow::anyhow!("No ODoH Config available"));
+            }
+        }
     };
     
     let mut seed_bytes = [0u8; 32];
@@ -477,12 +518,14 @@ async fn handle_query(
 
     match resp {
         Ok(r) => {
+            native_log("DEBUG", &format!("Received ODoH response for {}: status={}", domain, r.status()));
             if !r.status().is_success() {
                 stats.errors.fetch_add(1, Ordering::Relaxed);
                 add_query_log(domain.clone(), format!("Error {}", r.status()));
                 return Err(anyhow::anyhow!("HTTP Error {}", r.status()));
             }
             let resp_bytes = r.bytes().await?;
+            native_log("DEBUG", &format!("ODoH response body size: {} bytes", resp_bytes.len()));
             let mut response_cursor = Cursor::new(resp_bytes);
             let odoh_response: ObliviousDoHMessage = parse(&mut response_cursor)?; 
 
@@ -540,7 +583,7 @@ fn extract_domain(data: &[u8]) -> String {
 }
 
 async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) -> Result<SocketAddr> {
-    use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts};
+    use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, LookupIpStrategy};
     use hickory_resolver::proto::xfer::Protocol;
     use hickory_resolver::TokioResolver;
     use hickory_resolver::name_server::TokioConnectionProvider;
@@ -565,17 +608,36 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) 
 
     let mut opts = ResolverOpts::default();
     opts.ip_strategy = if allow_ipv6 {
-        hickory_resolver::config::LookupIpStrategy::Ipv4thenIpv6
+        LookupIpStrategy::Ipv4AndIpv6
     } else {
-        hickory_resolver::config::LookupIpStrategy::Ipv4Only
+        LookupIpStrategy::Ipv4Only
     };
 
     let resolver = TokioResolver::builder_with_config(config, TokioConnectionProvider::default())
         .with_options(opts)
         .build();
-    let ips = resolver.lookup_ip(domain).await.context("Failed to resolve DoH provider")?;
     
-    let ip = ips.iter().find(|ip| ip.is_ipv4()).or_else(|| ips.iter().find(|ip| ip.is_ipv6())).ok_or_else(|| anyhow::anyhow!("No IPs found"))?;
+    native_log("DEBUG", &format!("Resolving {} using bootstrap...", domain));
+    let ips = match resolver.lookup_ip(domain).await {
+        Ok(ips) => ips,
+        Err(e) => {
+            native_log("WARN", &format!("Full dual-stack lookup failed for {}, retrying with fallback nameservers: {:?}", domain, e));
+            let mut opts4 = ResolverOpts::default();
+            opts4.ip_strategy = LookupIpStrategy::Ipv4Only;
+            
+            // Try Cloudflare AND Google as fallbacks
+            let mut fallback_config = ResolverConfig::cloudflare();
+            fallback_config.add_name_server(NameServerConfig::new("8.8.8.8:53".parse()?, Protocol::Udp));
+            fallback_config.add_name_server(NameServerConfig::new("8.8.4.4:53".parse()?, Protocol::Udp));
+
+            let resolver4 = TokioResolver::builder_with_config(fallback_config, TokioConnectionProvider::default())
+                .with_options(opts4)
+                .build();
+            resolver4.lookup_ip(domain).await.context("Failed to resolve DoH provider (IPv4 retry)")?
+        }
+    };
+    
+    let ip = ips.iter().find(|ip| ip.is_ipv4()).or_else(|| ips.iter().find(|ip| ip.is_ipv6())).ok_or_else(|| anyhow::anyhow!("No IPs found for {}", domain))?;
     
     Ok(SocketAddr::new(ip, 443))
 }
@@ -586,7 +648,13 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
         .use_rustls_tls() 
         .pool_idle_timeout(Duration::from_secs(config.max_idle_time))
         .pool_max_idle_per_host(32) 
-        .connect_timeout(Duration::from_secs(config.conn_loss_time));
+        .connect_timeout(Duration::from_secs(30)); // Increase to 30s
+
+    // Some proxies like Hiddify might have certificate issues (CA used as End Entity)
+    if config.odoh_proxy_url.is_some() {
+        native_log("WARN", "ODoH Proxy configured: allowing invalid certificates for compatibility");
+        builder = builder.danger_accept_invalid_certs(true);
+    }
 
     if config.http11 { builder = builder.http1_only(); }
 
