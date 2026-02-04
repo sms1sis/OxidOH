@@ -478,8 +478,6 @@ class MainActivity : ComponentActivity() {
                                     val profile = profiles[index]
                                     pendingResolverUrl = profile.url
                                     pendingBootstrapDns = profile.bootstrap
-                                    resolverUrl = profile.url
-                                    bootstrapDns = profile.bootstrap
                                 }
                             },
                             onUrlChange = { pendingResolverUrl = it },
