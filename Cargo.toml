@@ -8,7 +8,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["rustls-tls", "socks", "http2", "gzip", "deflate"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "socks", "http2", "http3", "gzip", "deflate"], default-features = false }
 hickory-resolver = "0.25" # Formerly trust-dns
 odoh-rs = "1.0"
 dnsstamps = "0.1"

@@ -732,9 +732,11 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
     let mut builder = Client::builder()
         .dns_resolver(resolver)
         .use_rustls_tls() 
+        .http2_prior_knowledge() // Force HTTP/2 for better relay compatibility
+        .http3_prior_knowledge() // Try HTTP/3 if supported
         .pool_idle_timeout(Duration::from_secs(config.max_idle_time))
         .pool_max_idle_per_host(32) 
-        .connect_timeout(Duration::from_secs(30)); // Increase to 30s
+        .connect_timeout(Duration::from_secs(15));
 
     // Some proxies like Hiddify might have certificate issues (CA used as End Entity)
     if config.odoh_proxy_url.is_some() {

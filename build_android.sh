@@ -13,7 +13,7 @@ export PATH=$TOOLCHAIN:$PATH
 TARGET="aarch64-linux-android"
 
 # Optimization flags for ARMv8-A
-export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon" # Removed --cfg reqwest_unstable as we removed http3
+export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon --cfg reqwest_unstable"
 
 echo "Using NDK from: $ANDROID_NDK_HOME"
 echo "Building for ARMv8-A (arm64-v8a)..."
