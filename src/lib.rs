@@ -1,3 +1,5 @@
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::net::{SocketAddr, IpAddr};
 use anyhow::{Result, Context};
 use tokio::net::{UdpSocket, TcpListener};
@@ -447,7 +449,7 @@ async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<Obliviou
 
     for url in urls {
         for attempt in 0..2 {
-            let ua = if attempt == 0 { "dnscrypt-proxy" } else { "oxidoh/0.1.0" };
+            let ua = if attempt == 0 { "dnscrypt-proxy" } else { "oxidoh/0.1.1" };
             native_log("DEBUG", &format!("Trying odohconfigs from {} (UA: {})", url, ua));
             
             let resp = client.get(&url)
@@ -565,10 +567,24 @@ async fn handle_query(
 
     // Fallback logic for different relay styles
     if let Ok(ref r) = resp {
-        if r.status().as_u16() == 530 || r.status() == reqwest::StatusCode::NOT_FOUND {
-             native_log("WARN", &format!("Relay returned {}, trying path-based fallback...", r.status()));
-             // Try path-based fallback if query params failed (some relays use /proxy/targethost/targetpath)
-             if let Some(ref base_proxy) = proxy_url_str {
+        let status = r.status();
+        if status == reqwest::StatusCode::METHOD_NOT_ALLOWED || status.as_u16() == 530 || status == reqwest::StatusCode::NOT_FOUND {
+             native_log("WARN", &format!("Relay returned {}, trying fallback...", status));
+             
+             if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+                 // Try GET fallback
+                 let b64_query = URL_SAFE_NO_PAD.encode(&req_bytes);
+                 let mut get_url = Url::parse(&*resolver_url)?;
+                 get_url.query_pairs_mut().append_pair("dns", &b64_query);
+                 
+                 native_log("INFO", &format!("Trying GET fallback: {}", get_url));
+                 resp = client.get(get_url)
+                    .header("accept", "application/oblivious-dns-message")
+                    .header("user-agent", "dnscrypt-proxy")
+                    .send()
+                    .await;
+             } else if let Some(ref base_proxy) = proxy_url_str {
+                 // Try path-based fallback
                  let target_url = Url::parse(&*target_url_str).unwrap();
                  let fallback_url = format!("{}/{}{}", 
                     base_proxy.trim_end_matches('/'), 

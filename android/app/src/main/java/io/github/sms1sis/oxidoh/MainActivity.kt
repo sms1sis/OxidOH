@@ -160,7 +160,7 @@ class MainActivity : ComponentActivity() {
         val profiles = listOf(
             DnsProfile("Cloudflare via Fastly", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,1.1.1.1"),
             DnsProfile("Crypto.sx via Fastly", "https://odoh.crypto.sx/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,172.67.140.94"),
-            DnsProfile("Tiarap JP Direct", "https://jp.tiar.app/odoh", "174.138.29.175"),
+            DnsProfile("Tiarap JP Direct", "https://doh.tiar.app/odoh", "174.138.29.175"),
             DnsProfile("Tiarap.org Direct", "https://doh.tiarap.org/odoh", "174.138.29.175"),
             DnsProfile("Snowstorm Direct", "https://dope.snowstorm.love/dns-query", "1.1.1.1,8.8.8.8"),
             DnsProfile("Custom ODoH", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1")
@@ -618,26 +618,49 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
+                        val isCustom = selectedProfileIndex == profiles.size - 1
+                        var textFieldValue by remember(resolverUrl) { 
+                            mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(
+                                text = resolverUrl,
+                                selection = androidx.compose.ui.text.TextRange(resolverUrl.length)
+                            )) 
+                        }
+
                         OutlinedTextField(
-                            value = resolverUrl,
-                            onValueChange = onUrlChange,
+                            value = textFieldValue,
+                            onValueChange = {
+                                textFieldValue = it
+                                if (isCustom) onUrlChange(it.text)
+                            },
                             label = { Text("ODoH Target & Proxy URLs") },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
-                            singleLine = false,
-                            maxLines = 3,
-                            enabled = selectedProfileIndex == profiles.size - 1
+                            singleLine = true,
+                            readOnly = !isCustom,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri,
+                                autoCorrectEnabled = false
+                            )
                         )
                         
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            var bootstrapValue by remember(bootstrapDns) {
+                                mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(
+                                    text = bootstrapDns,
+                                    selection = androidx.compose.ui.text.TextRange(bootstrapDns.length)
+                                ))
+                            }
                             OutlinedTextField(
-                                value = bootstrapDns,
-                                onValueChange = onBootstrapChange,
+                                value = bootstrapValue,
+                                onValueChange = {
+                                    bootstrapValue = it
+                                    if (isCustom) onBootstrapChange(it.text)
+                                },
                                 label = { Text("Bootstrap") },
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(16.dp),
                                 singleLine = true,
-                                enabled = selectedProfileIndex == profiles.size - 1
+                                readOnly = !isCustom
                             )
                             OutlinedTextField(
                                 value = listenPort,
@@ -1091,7 +1114,7 @@ class MainActivity : ComponentActivity() {
             title = { Text("About OxidOH") },
             text = {
                 Column {
-                    Text("Version: v0.1.0", fontWeight = FontWeight.Bold)
+                    Text("Version: v0.1.1", fontWeight = FontWeight.Bold)
                     Text("Developer: sms1sis")
                     Spacer(Modifier.height(16.dp))
                     
@@ -1130,7 +1153,7 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun checkForUpdates(context: android.content.Context, uriHandler: androidx.compose.ui.platform.UriHandler) {
         val repoUrl = "https://api.github.com/repos/sms1sis/OxidOH/releases/latest"
-        val currentVersion = "v0.1.0"
+        val currentVersion = "v0.1.1"
 
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
