@@ -7,7 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use reqwest::{Client, Url};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, mpsc};
-use tracing::{error, debug};
+use tracing::debug;
 
 use std::time::Duration;
 use std::sync::atomic::{AtomicUsize, Ordering};
