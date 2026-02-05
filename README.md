@@ -42,6 +42,27 @@ Select from verified high-reliability profiles:
 
 The app automatically handles ODoH configuration fetching and maintains a heartbeat to ensure the proxy is always active.
 
+## ODoH Profiles & Privacy
+
+The application offers several connection profiles. Selecting a **Relayed** profile is required for "True ODoH" privacy (hiding your IP from the resolver).
+
+| Profile | Type | Privacy Level | Use Case |
+| :--- | :--- | :--- | :--- |
+| **Cloudflare Direct** | Direct | High (Encryption) | Maximum speed using Cloudflare's global network. Resolver sees your IP. |
+| **Cloudflare via Tiarap** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Cloudflare using Tiarap's Japan-based relay. |
+| **Cloudflare via Fastly** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Cloudflare using Fastly's global edge network. |
+| **Tiarap Direct** | Direct | High (Encryption) | Direct connection to Tiarap's privacy-focused resolver. |
+| **Snowstorm Direct** | Direct | High (Encryption) | Community-driven independent DNS for decentralization. |
+
+### The 6 Requirements for "Real" ODoH
+This app is designed to fulfill all requirements for true Oblivious DNS-over-HTTPS in Relayed mode:
+1. **No direct contact** between your device and the DNS resolver.
+2. **Proxy-First routing** where queries are sent to a relay.
+3. **Zero-Knowledge Proxy:** The relay cannot see which websites you are visiting.
+4. **Resolver Anonymity:** The DNS resolver cannot see your original IP address.
+5. **Double Encryption:** DNS payloads are encrypted for the resolver and wrapped in TLS for the proxy.
+6. **Explicit ODoH Support:** Full implementation of RFC 9230 (not just standard DoH).
+
 ## Technical Details
 
 - **Backend:** Built with `tokio`, `reqwest`, and `odoh-rs`.
