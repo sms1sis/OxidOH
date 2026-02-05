@@ -262,9 +262,12 @@ class ProxyService : VpnService() {
                     if (version == 0x40 && data[9].toInt() == 17) { // IPv4 UDP
                         val ihl = (data[0].toInt() and 0x0F) * 4
                         val dPort = ((data[ihl + 2].toInt() and 0xFF) shl 8) or (data[ihl + 3].toInt() and 0xFF)
-                        val dAddr = InetAddress.getByAddress(data.copyOfRange(ihl - 4, ihl))
+                        
+                        // IPv4 Destination Address is at bytes 16-19
+                        val dAddr = InetAddress.getByAddress(data.copyOfRange(16, 20))
                         
                         if (dPort == 53 || dAddr.hostAddress == "10.0.0.2") {
+                            Log.d(TAG, "DNS Packet Captured: to ${dAddr.hostAddress}:$dPort")
                             val dnsPayload = data.copyOfRange(ihl + 8, length)
                             udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
                             val recvBuf = ByteArray(4096)
@@ -272,9 +275,10 @@ class ProxyService : VpnService() {
                             udpSocket.soTimeout = 4000 
                             try {
                                 udpSocket.receive(recvPacket)
+                                Log.d(TAG, "DNS Response Received from Rust proxy: ${recvPacket.length} bytes")
                                 outputStream.write(constructIpv4Udp(data, recvPacket.data, recvPacket.length))
                             } catch (e: Exception) {
-                                Log.e(TAG, "Proxy timeout (IPv4)", e)
+                                Log.e(TAG, "Proxy timeout or error (IPv4)", e)
                             }
                         }
                     } else if (version == 0x60) {
@@ -371,8 +375,11 @@ class ProxyService : VpnService() {
         val totalLen = ihl + 8 + payloadLen
         val response = ByteArray(totalLen)
         System.arraycopy(request, 0, response, 0, ihl)
+        // Swap Source and Destination IPs
         System.arraycopy(request, 16, response, 12, 4)
         System.arraycopy(request, 12, response, 16, 4)
+        
+        // Swap UDP ports: response source = request dest, response dest = request source
         response[ihl] = request[ihl + 2]; response[ihl + 1] = request[ihl + 3]
         response[ihl + 2] = request[ihl]; response[ihl + 3] = request[ihl + 1]
         val udpLen = 8 + payloadLen
