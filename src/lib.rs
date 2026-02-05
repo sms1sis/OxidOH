@@ -248,12 +248,17 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         dynamic_resolver.update("one.one.one.one".to_string(), SocketAddr::new(ip, 443)).await;
     }
 
-    // Hardcoded fallbacks for common relays
+    // Hardcoded fallbacks for common relays and targets
     if let Ok(ip) = "172.67.140.94".parse::<IpAddr>() {
         dynamic_resolver.update("odoh-jp.tiarap.org".to_string(), SocketAddr::new(ip, 443)).await;
+        dynamic_resolver.update("odoh.crypto.sx".to_string(), SocketAddr::new(ip, 443)).await;
     }
     if let Ok(ip) = "151.101.1.51".parse::<IpAddr>() {
         dynamic_resolver.update("odoh-relay.edgecompute.app".to_string(), SocketAddr::new(ip, 443)).await;
+    }
+    if let Ok(ip) = "174.138.29.175".parse::<IpAddr>() {
+        dynamic_resolver.update("doh.tiarap.org".to_string(), SocketAddr::new(ip, 443)).await;
+        dynamic_resolver.update("jp.tiar.app".to_string(), SocketAddr::new(ip, 443)).await;
     }
 
     let ip = resolve_bootstrap(&target_domain, &config.bootstrap_dns, config.allow_ipv6, Some(&dynamic_resolver)).await?;

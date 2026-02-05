@@ -158,9 +158,10 @@ class MainActivity : ComponentActivity() {
         var pendingCacheTtl by remember { mutableStateOf(cacheTtl) }
 
         val profiles = listOf(
-            DnsProfile("Cloudflare via Fastly", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.edgecompute.app/", "151.101.1.51,1.1.1.1"),
-            DnsProfile("Cloudflare via Tiarap JP", "https://odoh.cloudflare-dns.com/dns-query https://odoh-jp.tiarap.org/proxy", "172.67.140.94,1.1.1.1"),
-            DnsProfile("Tiarap Direct", "https://doh.tiar.app/odoh", "174.138.29.175"),
+            DnsProfile("Cloudflare via Fastly", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,1.1.1.1"),
+            DnsProfile("Crypto.sx via Fastly", "https://odoh.crypto.sx/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,172.67.140.94"),
+            DnsProfile("Tiarap JP Direct", "https://jp.tiar.app/odoh", "174.138.29.175"),
+            DnsProfile("Tiarap.org Direct", "https://doh.tiarap.org/odoh", "174.138.29.175"),
             DnsProfile("Snowstorm Direct", "https://dope.snowstorm.love/dns-query", "1.1.1.1,8.8.8.8"),
             DnsProfile("Custom ODoH", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1")
         )
@@ -623,7 +624,8 @@ class MainActivity : ComponentActivity() {
                             label = { Text("ODoH Target & Proxy URLs") },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(16.dp),
-                            singleLine = true,
+                            singleLine = false,
+                            maxLines = 3,
                             enabled = selectedProfileIndex == profiles.size - 1
                         )
                         

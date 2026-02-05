@@ -12,7 +12,7 @@ export PATH=$TOOLCHAIN:$PATH
 # Define target - focusing ONLY on arm64-v8a (ARMv8-A)
 TARGET="aarch64-linux-android"
 
-# Optimization flags for ARMv8-A
+# Optimization flags for ARMv8-A - MUST BE EXPORTED BEFORE CARGO
 export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon --cfg reqwest_unstable"
 
 echo "Using NDK from: $ANDROID_NDK_HOME"
