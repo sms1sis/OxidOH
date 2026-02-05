@@ -186,7 +186,11 @@ class ProxyService : VpnService() {
                 .establish()
             
             Log.d(TAG, "VPN Interface established (IPv6: $allowIpv6)")
-            thread { forwardPackets(listenPort) }
+            thread { 
+                Thread.sleep(1000)
+                Log.d(TAG, "Starting packet forwarding thread on port $listenPort")
+                forwardPackets(listenPort) 
+            }
             
             if (heartbeatEnabled) {
                 startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
@@ -259,51 +263,57 @@ class ProxyService : VpnService() {
                     val data = packet.array()
                     val version = (data[0].toInt() and 0xF0)
                     
-                    if (version == 0x40 && data[9].toInt() == 17) { // IPv4 UDP
+                    if (version == 0x40) { // IPv4
+                        val protocol = data[9].toInt() and 0xFF
                         val ihl = (data[0].toInt() and 0x0F) * 4
-                        val dPort = ((data[ihl + 2].toInt() and 0xFF) shl 8) or (data[ihl + 3].toInt() and 0xFF)
                         
-                        // IPv4 Destination Address is at bytes 16-19
-                        val dAddr = InetAddress.getByAddress(data.copyOfRange(16, 20))
-                        
-                        if (dPort == 53 || dAddr.hostAddress == "10.0.0.2") {
-                            Log.d(TAG, "DNS Packet Captured: to ${dAddr.hostAddress}:$dPort")
-                            val dnsPayload = data.copyOfRange(ihl + 8, length)
-                            udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
-                            val recvBuf = ByteArray(4096)
-                            val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
-                            udpSocket.soTimeout = 4000 
-                            try {
-                                udpSocket.receive(recvPacket)
-                                Log.d(TAG, "DNS Response Received from Rust proxy: ${recvPacket.length} bytes")
-                                outputStream.write(constructIpv4Udp(data, recvPacket.data, recvPacket.length))
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Proxy timeout or error (IPv4)", e)
+                        if (protocol == 17) { // UDP
+                            val dAddr = InetAddress.getByAddress(data.copyOfRange(16, 20)).hostAddress
+                            val dPort = ((data[ihl + 2].toInt() and 0xFF) shl 8) or (data[ihl + 3].toInt() and 0xFF)
+                            
+                            if (dPort == 53 || dAddr == "10.0.0.2") {
+                                Log.d(TAG, "MATCHED DNS Packet (IPv4): to $dAddr:$dPort")
+                                val dnsPayload = data.copyOfRange(ihl + 8, length)
+                                udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
+                                val recvBuf = ByteArray(4096)
+                                val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
+                                udpSocket.soTimeout = 4000 
+                                try {
+                                    udpSocket.receive(recvPacket)
+                                    Log.d(TAG, "DNS Response Received from Rust proxy: ${recvPacket.length} bytes")
+                                    outputStream.write(constructIpv4Udp(data, recvPacket.data, recvPacket.length))
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Proxy timeout or error (IPv4)", e)
+                                }
                             }
                         }
-                    } else if (version == 0x60) {
+                    } else if (version == 0x60) { // IPv6
                         val nextHeader = data[6].toInt() and 0xFF
-                        // Log.d(TAG, "IPv6 packet seen: nextHeader=$nextHeader")
                         if (nextHeader == 17) { // UDP
                             val dPort = ((data[42].toInt() and 0xFF) shl 8) or (data[43].toInt() and 0xFF)
                             if (dPort == 53) {
+                                Log.d(TAG, "MATCHED DNS Packet (IPv6): to port $dPort")
                                 val dnsPayload = data.copyOfRange(48, length)
                                 udpSocket.send(DatagramPacket(dnsPayload, dnsPayload.size, proxyAddr, proxyPort))
                                 val recvBuf = ByteArray(4096)
                                 val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
                                 udpSocket.soTimeout = 4000
-                                                            try {
-                                                                udpSocket.receive(recvPacket)
-                                                                outputStream.write(constructIpv6Udp(data, recvPacket.data, recvPacket.length))
-                                                            } catch (e: Exception) {
-                                                                Log.e(TAG, "Proxy timeout (IPv6)", e)
-                                                            }                            }
+                                try {
+                                    udpSocket.receive(recvPacket)
+                                    Log.d(TAG, "DNS Response Received (IPv6): ${recvPacket.length} bytes")
+                                    outputStream.write(constructIpv6Udp(data, recvPacket.data, recvPacket.length))
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Proxy timeout (IPv6)", e)
+                                }
+                            }
                         }
                     }
                     packet.clear()
                 }
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "forwardPackets critical error", e)
+        }
     }
 
     private fun constructIpv6Udp(request: ByteArray, payload: ByteArray, payloadLen: Int): ByteArray {

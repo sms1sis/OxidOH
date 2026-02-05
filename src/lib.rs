@@ -194,7 +194,7 @@ static JVM: LazyLock<std::sync::RwLock<Option<JavaVM>>> = LazyLock::new(|| std::
 static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::GlobalRef>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<()> {
-    let addr: SocketAddr = format!("{}:{}", config.listen_addr, config.listen_port)
+    let addr: SocketAddr = format!("{}:{}", "0.0.0.0", config.listen_port)
         .parse()
         .context("Failed to parse listen address")?;
 
@@ -244,22 +244,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     native_log("INFO", &format!("Listening on {} -> ODoH Target {}", addr, config.odoh_target_url));
 
-    let ip = resolve_bootstrap(&target_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
-    let ip_with_port = SocketAddr::new(ip.ip(), 443);
-    native_log("INFO", &format!("Bootstrapped Target {} to {}", target_domain, ip_with_port));
-    
     let dynamic_resolver = DynamicResolver::new();
-    dynamic_resolver.update(target_domain.clone(), ip_with_port).await;
-
-    if let Some(proxy_url) = &config.odoh_proxy_url {
-        let proxy_url_parsed = Url::parse(proxy_url).context("Failed to parse ODoH Proxy URL")?;
-        let proxy_domain = proxy_url_parsed.domain().context("Proxy URL must have a domain")?.to_string();
-        let proxy_ip = resolve_bootstrap(&proxy_domain, &config.bootstrap_dns, config.allow_ipv6).await?;
-        let proxy_ip_with_port = SocketAddr::new(proxy_ip.ip(), 443);
-        native_log("INFO", &format!("Bootstrapped Proxy {} to {}", proxy_domain, proxy_ip_with_port));
-        dynamic_resolver.update(proxy_domain, proxy_ip_with_port).await;
-    }
-
     // Also bootstrap one.one.one.one just in case Cloudflare Target uses it internally
     if let Ok(ip) = "1.1.1.1".parse::<IpAddr>() {
         dynamic_resolver.update("one.one.one.one".to_string(), SocketAddr::new(ip, 443)).await;
@@ -271,6 +256,21 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     }
     if let Ok(ip) = "151.101.1.51".parse::<IpAddr>() {
         dynamic_resolver.update("odoh-relay.edgecompute.app".to_string(), SocketAddr::new(ip, 443)).await;
+    }
+
+    let ip = resolve_bootstrap(&target_domain, &config.bootstrap_dns, config.allow_ipv6, Some(&dynamic_resolver)).await?;
+    let ip_with_port = SocketAddr::new(ip.ip(), 443);
+    native_log("INFO", &format!("Bootstrapped Target {} to {}", target_domain, ip_with_port));
+    
+    dynamic_resolver.update(target_domain.clone(), ip_with_port).await;
+
+    if let Some(proxy_url) = &config.odoh_proxy_url {
+        let proxy_url_parsed = Url::parse(proxy_url).context("Failed to parse ODoH Proxy URL")?;
+        let proxy_domain = proxy_url_parsed.domain().context("Proxy URL must have a domain")?.to_string();
+        let proxy_ip = resolve_bootstrap(&proxy_domain, &config.bootstrap_dns, config.allow_ipv6, Some(&dynamic_resolver)).await?;
+        let proxy_ip_with_port = SocketAddr::new(proxy_ip.ip(), 443);
+        native_log("INFO", &format!("Bootstrapped Proxy {} to {}", proxy_domain, proxy_ip_with_port));
+        dynamic_resolver.update(proxy_domain, proxy_ip_with_port).await;
     }
 
     let client = create_client(&config, Arc::new(dynamic_resolver))?;
@@ -301,7 +301,20 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         }
     }
 
-    let send_url = config.odoh_proxy_url.clone().unwrap_or_else(|| config.odoh_target_url.clone());
+    let send_url = if let Some(proxy_url) = &config.odoh_proxy_url {
+        let mut url = Url::parse(proxy_url).context("Failed to parse proxy URL")?;
+        let target_url = Url::parse(&config.odoh_target_url).context("Failed to parse target URL")?;
+        
+        url.query_pairs_mut()
+            .append_pair("targethost", target_url.host_str().unwrap_or(""))
+            .append_pair("targetpath", target_url.path());
+        
+        native_log("INFO", &format!("Using Relay URL: {}", url));
+        url.to_string()
+    } else {
+        config.odoh_target_url.clone()
+    };
+    
     let send_url_str = Arc::new(send_url);
     
     let cache: DnsCache = Cache::builder().max_capacity(2048).build();
@@ -333,8 +346,9 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let cache = cache.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
+                            native_log("DEBUG", &format!("Handling UDP query from {}", peer));
                             if let Err(e) = handle_query(Some(socket), None, client, resolver_url, data, peer, stats, cache).await {
-                                debug!("UDP error: {}", e);
+                                native_log("ERROR", &format!("UDP error: {}", e));
                             }
                         });
                     }
@@ -508,7 +522,8 @@ async fn handle_query(
     getrandom::getrandom(&mut seed_bytes).unwrap();
     let mut rng = StdRng::from_seed(seed_bytes);
     
-    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, 0); 
+    // Use padding (e.g., 32) to satisfy some stricter ODoH targets
+    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, 32); 
     let config_contents: ObliviousDoHConfigContents = odoh_config.into();
     let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?; 
     
@@ -519,6 +534,7 @@ async fn handle_query(
     
     let mut resp = client.post(&*resolver_url)
         .header("content-type", "application/oblivious-dns-message")
+        .header("accept", "application/oblivious-dns-message")
         .body(req_bytes.clone())
         .send()
         .await;
@@ -542,14 +558,23 @@ async fn handle_query(
         Ok(r) => {
             native_log("DEBUG", &format!("Received ODoH response for {}: status={}", domain, r.status()));
             if !r.status().is_success() {
+                let status_code = r.status().as_u16();
                 stats.errors.fetch_add(1, Ordering::Relaxed);
-                add_query_log(domain.clone(), format!("Error {}", r.status()));
-                return Err(anyhow::anyhow!("HTTP Error {}", r.status()));
+                add_query_log(domain.clone(), format!("Error {}", status_code));
+                native_log("ERROR", &format!("ODoH Request failed for {} with status {}", domain, status_code));
+                return Err(anyhow::anyhow!("HTTP Error {}", status_code));
             }
             let resp_bytes = r.bytes().await?;
-            native_log("DEBUG", &format!("ODoH response body size: {} bytes", resp_bytes.len()));
-            let mut response_cursor = Cursor::new(resp_bytes);
-            let odoh_response: ObliviousDoHMessage = parse(&mut response_cursor)?; 
+            native_log("DEBUG", &format!("ODoH response body size: {} bytes. First 4 bytes: {:02x?}", resp_bytes.len(), &resp_bytes[..std::cmp::min(resp_bytes.len(), 4)]));
+            
+            let mut response_cursor = Cursor::new(resp_bytes.clone());
+            let odoh_response: ObliviousDoHMessage = match parse(&mut response_cursor) {
+                Ok(m) => m,
+                Err(e) => {
+                    native_log("ERROR", &format!("Failed to parse ODoH message: {:?}. Raw body (hex): {:02x?}", e, &resp_bytes[..std::cmp::min(resp_bytes.len(), 16)]));
+                    return Err(e.into());
+                }
+            };
 
             let dns_resp_plaintext = decrypt_response(&query_plaintext, &odoh_response, client_secret)?;
             let dns_resp = dns_resp_plaintext.into_msg().to_vec(); 
@@ -579,6 +604,7 @@ async fn send_response(
     data: Bytes,
     peer: SocketAddr
 ) -> Result<()> {
+    native_log("DEBUG", &format!("Sending response of {} bytes back to {}", data.len(), peer));
     if let Some(s) = udp_sock {
         s.send_to(&data, peer).await?;
     } else if let Some(s) = &mut tcp_stream {
@@ -604,7 +630,17 @@ fn extract_domain(data: &[u8]) -> String {
     if d.is_empty() { "unknown".to_string() } else { d }
 }
 
-async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool) -> Result<SocketAddr> {
+async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, dynamic_resolver: Option<&DynamicResolver>) -> Result<SocketAddr> {
+    if let Some(resolver) = dynamic_resolver {
+        let hosts = resolver.hosts.read().await;
+        if let Some(addrs) = hosts.get(domain) {
+            if let Some(addr) = addrs.first() {
+                native_log("INFO", &format!("Using cached/hardcoded bootstrap for {}: {}", domain, addr));
+                return Ok(*addr);
+            }
+        }
+    }
+
     use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, LookupIpStrategy};
     use hickory_resolver::proto::xfer::Protocol;
     use hickory_resolver::TokioResolver;
