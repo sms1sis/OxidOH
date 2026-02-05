@@ -6,6 +6,7 @@ A Rust implementation of an Oblivious DNS over HTTPS (ODoH) proxy for Android, f
 
 - **Rust-Powered Proxy:** High-performance ODoH backend for enhanced privacy.
 - **Robust Config Fetching:** Implements RFC 9230 with multi-path fallbacks, automatic retries (5 attempts), and rotated User-Agents.
+- **Verified Service Providers:** Curated list of high-reliability ODoH targets and relays (Cloudflare, Tiarap, Snowstorm).
 - **Dynamic Service Switching:** Optimized background service for seamless switching between providers.
 - **Hexagonal Branding:** Custom hexagonal launcher and notification icons for a modern look.
 - **Smart Bootstrapping:** Hardcoded fallbacks for unreliable providers to ensure constant connectivity.
@@ -36,14 +37,15 @@ A Rust implementation of an Oblivious DNS over HTTPS (ODoH) proxy for Android, f
 Select from verified high-reliability profiles:
 - **Cloudflare Direct:** Optimized for speed and privacy.
 - **Cloudflare via Tiarap:** Regional proxying for enhanced obfuscation.
-- **Crypto.sx Direct:** Anycast-powered private resolver.
+- **Cloudflare via Fastly:** Global relaying via Fastly's edge compute.
+- **Tiarap / Snowstorm:** Independent high-privacy targets.
 
 The app automatically handles ODoH configuration fetching and maintains a heartbeat to ensure the proxy is always active.
 
 ## Technical Details
 
 - **Backend:** Built with `tokio`, `reqwest`, and `odoh-rs`.
-- **Networking:** Uses `SO_REUSEADDR/PORT` for stable restarts and custom `protect()` calls to bypass VPN routing loops.
+- **Networking:** Uses `SO_REUSEADDR/PORT` for stable restarts and custom JNI logging for real-time diagnostics.
 - **Frontend:** Modern Jetpack Compose UI with real-time latency and query logging.
 
 ## Contributing

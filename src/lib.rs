@@ -384,12 +384,19 @@ async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<Obliviou
     let scheme = parsed.scheme();
     
     // Multiple standard and fallback paths
-    let urls = vec![
+    let mut urls = vec![
         format!("{}://{}/.well-known/odohconfigs", scheme, host),
         format!("{}://{}/odohconfigs", scheme, host),
-        if target_url.ends_with('/') { format!("{}.well-known/odohconfigs", target_url) } else { format!("{}/.well-known/odohconfigs", target_url) },
-        target_url.to_string(),
     ];
+    
+    if target_url.ends_with('/') {
+        urls.push(format!("{}.well-known/odohconfigs", target_url));
+        urls.push(format!("{}odohconfigs", target_url));
+    } else {
+        urls.push(format!("{}/.well-known/odohconfigs", target_url));
+        urls.push(format!("{}/odohconfigs", target_url));
+    }
+    urls.push(target_url.to_string());
 
     let mut last_err = anyhow::anyhow!("No config paths tried");
 
@@ -408,14 +415,15 @@ async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<Obliviou
 
             match resp {
                 Ok(r) => {
-                    if r.status().is_success() {
+                    let status = r.status();
+                    if status.is_success() {
                         let bytes = r.bytes().await?;
                         if bytes.is_empty() {
-                            last_err = anyhow::anyhow!("Empty config from {}", url);
+                            native_log("WARN", &format!("Empty config from {}", url));
                             continue;
                         }
                         native_log("DEBUG", &format!("Fetched {} bytes from {}", bytes.len(), url));
-                        let mut cursor = Cursor::new(bytes); 
+                        let mut cursor = Cursor::new(bytes.clone()); 
                         match parse::<ObliviousDoHConfigs, _>(&mut cursor) {
                             Ok(configs) => {
                                 if let Some(config) = configs.supported().into_iter().next() {
@@ -423,9 +431,10 @@ async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<Obliviou
                                     return Ok(config);
                                 }
                             }
-                            Err(_) => {
+                            Err(e) => {
+                                native_log("DEBUG", &format!("Failed to parse as ObliviousDoHConfigs: {:?}. Content (hex): {:02x?}", e, &bytes[..std::cmp::min(bytes.len(), 16)]));
                                 // Try parsing as single config if multiple failed
-                                let mut cursor2 = Cursor::new(cursor.into_inner());
+                                let mut cursor2 = Cursor::new(bytes);
                                 if let Ok(config) = parse::<ObliviousDoHConfig, _>(&mut cursor2) {
                                     native_log("INFO", &format!("Successfully fetched single ODoH config from {}", url));
                                     return Ok(config);
@@ -433,11 +442,12 @@ async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<Obliviou
                             }
                         }
                     } else {
-                        native_log("WARN", &format!("Failed path {}: {}", url, r.status()));
+                        native_log("DEBUG", &format!("Path {} returned status {}", url, status));
+                        last_err = anyhow::anyhow!("Path {} returned status {}", url, status);
                     }
                 }
                 Err(e) => {
-                    native_log("WARN", &format!("Error reaching {}: {:?}", url, e));
+                    native_log("DEBUG", &format!("Error reaching {}: {:?}", url, e));
                     last_err = e.into();
                 }
             }
