@@ -302,15 +302,18 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     }
 
     let send_url = if let Some(proxy_url) = &config.odoh_proxy_url {
-        let mut url = Url::parse(proxy_url).context("Failed to parse proxy URL")?;
         let target_url = Url::parse(&config.odoh_target_url).context("Failed to parse target URL")?;
+        let connector = if proxy_url.contains('?') { "&" } else { "?" };
         
-        url.query_pairs_mut()
-            .append_pair("targethost", target_url.host_str().unwrap_or(""))
-            .append_pair("targetpath", target_url.path());
+        let url = format!("{}{}targethost={}&targetpath={}", 
+            proxy_url, 
+            connector,
+            target_url.host_str().unwrap_or(""),
+            target_url.path() // This keeps /dns-query as raw string
+        );
         
         native_log("INFO", &format!("Using Relay URL: {}", url));
-        url.to_string()
+        url
     } else {
         config.odoh_target_url.clone()
     };
@@ -327,10 +330,15 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     native_log("INFO", "Starting proxy loops");
 
+    let target_url_str = Arc::new(config.odoh_target_url.clone());
+    let proxy_url_str = config.odoh_proxy_url.as_ref().map(|s| Arc::new(s.clone()));
+
     let mut udp_loop = {
         let socket = udp_socket.clone();
         let client = client.clone();
         let resolver_url = send_url_str.clone();
+        let target_url = target_url_str.clone();
+        let proxy_url = proxy_url_str.clone();
         let stats = stats.clone();
         let cache = cache.clone();
         tokio::spawn(async move {
@@ -342,12 +350,14 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let socket = socket.clone();
                         let client = client.clone();
                         let resolver_url = resolver_url.clone();
+                        let target_url = target_url.clone();
+                        let proxy_url = proxy_url.clone();
                         let stats = stats.clone();
                         let cache = cache.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
                             native_log("DEBUG", &format!("Handling UDP query from {}", peer));
-                            if let Err(e) = handle_query(Some(socket), None, client, resolver_url, data, peer, stats, cache).await {
+                            if let Err(e) = handle_query(Some(socket), None, client, resolver_url, target_url, proxy_url, data, peer, stats, cache).await {
                                 native_log("ERROR", &format!("UDP error: {}", e));
                             }
                         });
@@ -362,6 +372,8 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
          let listener = tcp_listener;
          let client = client.clone();
          let resolver_url = send_url_str.clone();
+         let target_url = target_url_str.clone();
+         let proxy_url = proxy_url_str.clone();
          let stats = stats.clone();
          let cache = cache.clone();
          tokio::spawn(async move {
@@ -369,6 +381,8 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                 if let Ok((mut stream, peer)) = listener.accept().await {
                      let client = client.clone();
                      let resolver_url = resolver_url.clone();
+                     let target_url = target_url.clone();
+                     let proxy_url = proxy_url.clone();
                      let stats = stats.clone();
                      let cache = cache.clone();
                      tokio::spawn(async move {
@@ -378,7 +392,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                              let len = u16::from_be_bytes(len_buf) as usize;
                              let mut data = vec![0u8; len];
                              if stream.read_exact(&mut data).await.is_ok() {
-                                 let _ = handle_query(None, Some(stream), client, resolver_url, Bytes::from(data), peer, stats, cache).await;
+                                 let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache).await;
                              }
                          }
                      });
@@ -488,6 +502,8 @@ async fn handle_query(
     tcp_stream: Option<tokio::net::TcpStream>,
     client: Client,
     resolver_url: Arc<String>,
+    target_url_str: Arc<String>,
+    proxy_url_str: Option<Arc<String>>,
     data: Bytes,
     peer: SocketAddr,
     stats: Arc<Stats>,
@@ -535,22 +551,34 @@ async fn handle_query(
     let mut resp = client.post(&*resolver_url)
         .header("content-type", "application/oblivious-dns-message")
         .header("accept", "application/oblivious-dns-message")
+        .header("user-agent", "dnscrypt-proxy")
+        .header("proxy-connection", "keep-alive")
+        .header("cache-control", "no-cache")
         .body(req_bytes.clone())
         .send()
         .await;
 
-    // Fallback to GET if POST is not implemented (501)
+    // Fallback logic for different relay styles
     if let Ok(ref r) = resp {
-        if r.status() == reqwest::StatusCode::NOT_IMPLEMENTED {
-            native_log("WARN", &format!("POST failed with 501 for {}, retrying with GET", domain));
-            let b64_query = URL_SAFE_NO_PAD.encode(&req_bytes);
-            let mut get_url = Url::parse(&*resolver_url)?;
-            get_url.query_pairs_mut().append_pair("dns", &b64_query);
-            
-            resp = client.get(get_url)
-                .header("accept", "application/oblivious-dns-message")
-                .send()
-                .await;
+        if r.status().as_u16() == 530 || r.status() == reqwest::StatusCode::NOT_FOUND {
+             native_log("WARN", &format!("Relay returned {}, trying path-based fallback...", r.status()));
+             // Try path-based fallback if query params failed (some relays use /proxy/targethost/targetpath)
+             if let Some(ref base_proxy) = proxy_url_str {
+                 let target_url = Url::parse(&*target_url_str).unwrap();
+                 let fallback_url = format!("{}/{}{}", 
+                    base_proxy.trim_end_matches('/'), 
+                    target_url.host_str().unwrap_or(""), 
+                    target_url.path()
+                 );
+                 native_log("INFO", &format!("Path-based fallback URL: {}", fallback_url));
+                 resp = client.post(&fallback_url)
+                    .header("content-type", "application/oblivious-dns-message")
+                    .header("accept", "application/oblivious-dns-message")
+                    .header("user-agent", "dnscrypt-proxy")
+                    .body(req_bytes.clone())
+                    .send()
+                    .await;
+             }
         }
     }
 
