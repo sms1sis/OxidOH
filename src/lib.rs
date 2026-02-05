@@ -506,7 +506,6 @@ async fn handle_query(
     
     let mut resp = client.post(&*resolver_url)
         .header("content-type", "application/oblivious-dns-message")
-        .header("accept", "application/oblivious-dns-message")
         .body(req_bytes.clone())
         .send()
         .await;
