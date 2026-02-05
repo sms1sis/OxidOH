@@ -335,6 +335,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     let target_url_str = Arc::new(config.odoh_target_url.clone());
     let proxy_url_str = config.odoh_proxy_url.as_ref().map(|s| Arc::new(s.clone()));
+    let cache_ttl = config.cache_ttl as u32;
 
     let mut udp_loop = {
         let socket = udp_socket.clone();
@@ -360,7 +361,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
                             native_log("DEBUG", &format!("Handling UDP query from {}", peer));
-                            if let Err(e) = handle_query(Some(socket), None, client, resolver_url, target_url, proxy_url, data, peer, stats, cache).await {
+                            if let Err(e) = handle_query(Some(socket), None, client, resolver_url, target_url, proxy_url, data, peer, stats, cache, cache_ttl).await {
                                 native_log("ERROR", &format!("UDP error: {}", e));
                             }
                         });
@@ -395,7 +396,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                              let len = u16::from_be_bytes(len_buf) as usize;
                              let mut data = vec![0u8; len];
                              if stream.read_exact(&mut data).await.is_ok() {
-                                 let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache).await;
+                                 let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl).await;
                              }
                          }
                      });
@@ -511,6 +512,7 @@ async fn handle_query(
     peer: SocketAddr,
     stats: Arc<Stats>,
     cache: DnsCache,
+    cache_ttl: u32,
 ) -> Result<()> {
     let domain = extract_domain(&data);
 
@@ -615,7 +617,7 @@ async fn handle_query(
             add_query_log(domain.clone(), format!("OK ({}ms)", latency));
 
             if data.len() > 2 && dns_resp.len() > 2 {
-                cache.insert(data.slice(2..), (Bytes::copy_from_slice(&dns_resp), 60)).await;
+                cache.insert(data.slice(2..), (Bytes::copy_from_slice(&dns_resp), cache_ttl)).await;
             }
             
             send_response(udp_sock, tcp_stream, Bytes::from(dns_resp), peer).await
@@ -735,8 +737,9 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
     let mut builder = Client::builder()
         .dns_resolver(resolver)
         .use_rustls_tls() 
-        .http2_prior_knowledge() // Force HTTP/2 for better relay compatibility
-        .http3_prior_knowledge() // Try HTTP/3 if supported
+        .danger_accept_invalid_certs(true) // Required for some ODoH proxies/relays
+        .http2_prior_knowledge() 
+        .http3_prior_knowledge()
         .pool_idle_timeout(Duration::from_secs(config.max_idle_time))
         .pool_max_idle_per_host(32) 
         .connect_timeout(Duration::from_secs(15));
@@ -933,7 +936,10 @@ pub mod jni_api {
         RUNTIME.spawn(async {
             if let Some(cache) = &*GLOBAL_CACHE.read().await {
                 cache.invalidate_all();
-                debug!("DNS Cache cleared via JNI");
+                cache.run_pending_tasks().await;
+                native_log("INFO", "DNS Cache cleared successfully");
+            } else {
+                native_log("WARN", "DNS Cache clear failed: Cache not initialized");
             }
         });
     }
