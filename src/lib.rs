@@ -265,6 +265,14 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         dynamic_resolver.update("one.one.one.one".to_string(), SocketAddr::new(ip, 443)).await;
     }
 
+    // Hardcoded fallbacks for common relays
+    if let Ok(ip) = "172.67.140.94".parse::<IpAddr>() {
+        dynamic_resolver.update("odoh-jp.tiarap.org".to_string(), SocketAddr::new(ip, 443)).await;
+    }
+    if let Ok(ip) = "151.101.1.51".parse::<IpAddr>() {
+        dynamic_resolver.update("odoh-relay.edgecompute.app".to_string(), SocketAddr::new(ip, 443)).await;
+    }
+
     let client = create_client(&config, Arc::new(dynamic_resolver))?;
     
     let mut fetched_config = None;
