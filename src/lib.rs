@@ -98,6 +98,9 @@ static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock:
 });
 
 fn native_log(level: &str, msg: &str) {
+    if level == "DEBUG" && !cfg!(debug_assertions) {
+        return;
+    }
     let _ = NATIVE_LOG_SENDER.send(NativeLog {
         level: level.to_string(),
         msg: msg.to_string(),
@@ -110,7 +113,9 @@ static GLOBAL_CACHE: LazyLock<RwLock<Option<DnsCache>>> = LazyLock::new(|| RwLoc
 static LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
 
 fn add_query_log(domain: String, status: String) {
-    debug!("QUERY: {} -> {}", domain, status);
+    if !cfg!(debug_assertions) && status.contains("DEBUG") {
+        return;
+    }
     let _ = LOG_SENDER.send(LogMessage { domain, status });
 }
 
@@ -702,9 +707,15 @@ pub mod jni_api {
         _class: JClass,
         _context: JObject,
     ) {
+         let filter = if cfg!(debug_assertions) {
+             log::LevelFilter::Debug
+         } else {
+             log::LevelFilter::Info
+         };
+
          android_logger::init_once(
             android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Debug)
+                .with_max_level(filter)
                 .with_tag("OxidOH")
          );
          
