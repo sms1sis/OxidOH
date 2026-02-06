@@ -626,18 +626,26 @@ async fn handle_query(
 
     for attempt in 1..=3 {
         if attempt > 1 {
-            tokio::time::sleep(Duration::from_millis(100 * (attempt - 1))).await;
+            tokio::time::sleep(Duration::from_millis(50)).await; // Fast retry
         }
 
-        let resp = client.post(&*resolver_url)
+        let resp_future = client.post(&*resolver_url)
             .header("content-type", "application/oblivious-dns-message")
             .header("accept", "application/oblivious-dns-message")
             .header("user-agent", "oxidoh/0.2.0")
             .header("proxy-connection", "keep-alive")
             .header("cache-control", "no-cache")
             .body(req_bytes.clone())
-            .send()
-            .await;
+            .send();
+            
+        // Individual attempt timeout
+        let resp = match tokio::time::timeout(Duration::from_secs(4), resp_future).await {
+            Ok(res) => res,
+            Err(_) => {
+                last_err = Some(anyhow::anyhow!("Attempt {} timed out", attempt));
+                continue;
+            }
+        };
 
         // Fallback logic for different relay styles
         let mut retry_resp = resp;
@@ -884,9 +892,9 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
         .danger_accept_invalid_certs(true) // Required for some ODoH proxies/relays
         .http2_adaptive_window(true)
         .tcp_keepalive(Some(Duration::from_secs(60)))
-        .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(16) 
-        .connect_timeout(Duration::from_secs(15));
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(32) 
+        .connect_timeout(Duration::from_secs(5));
 
     // Some proxies like Hiddify might have certificate issues (CA used as End Entity)
     if config.odoh_proxy_url.is_some() {
