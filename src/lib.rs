@@ -577,16 +577,28 @@ async fn handle_query(
         }
     }
 
-    let odoh_config = {
+    let mut odoh_config_opt = {
         let lock = ODOH_CONFIG.read().map_err(|_| anyhow::anyhow!("Lock error"))?;
-        match lock.as_ref() {
-            Some(c) => c.clone(),
-            None => {
-                add_query_log(domain, "Error (No ODoH Config)".to_string());
-                return Err(anyhow::anyhow!("No ODoH Config available"));
+        lock.as_ref().cloned()
+    };
+
+    if odoh_config_opt.is_none() {
+        native_log("WARN", "ODoH Config missing in handle_query, attempting on-demand fetch...");
+        match fetch_odoh_config(&client, &*target_url_str).await {
+            Ok(c) => {
+                if let Ok(mut w) = ODOH_CONFIG.write() {
+                    *w = Some(c.clone());
+                }
+                odoh_config_opt = Some(c);
+            }
+            Err(e) => {
+                add_query_log(domain, "Error (Config Fetch Failed)".to_string());
+                return Err(anyhow::anyhow!("Failed to fetch ODoH config on-demand: {:?}", e));
             }
         }
-    };
+    }
+
+    let odoh_config = odoh_config_opt.unwrap();
     
     let mut seed_bytes = [0u8; 32];
     getrandom::fill(&mut seed_bytes).unwrap();
@@ -673,6 +685,14 @@ async fn handle_query(
 
         match retry_resp {
             Ok(r) => {
+                if r.status() == reqwest::StatusCode::UNAUTHORIZED {
+                    native_log("WARN", "ODoH Target returned 401: Invalidating config and retrying...");
+                    if let Ok(mut w) = ODOH_CONFIG.write() {
+                        *w = None;
+                    }
+                    last_err = Some(anyhow::anyhow!("HTTP 401 (Unauthorized/Expired Config)"));
+                    continue;
+                }
                 if !r.status().is_success() {
                     let status_code = r.status().as_u16();
                     last_err = Some(anyhow::anyhow!("HTTP {}", status_code));
@@ -721,6 +741,9 @@ async fn handle_query(
         send_response(udp_sock, tcp_stream, Bytes::from(resp), peer).await
     } else {
         stats.errors.fetch_add(1, Ordering::Relaxed);
+        let err_msg = if let Some(ref e) = last_err { e.to_string() } else { "Unknown error".to_string() };
+        native_log("ERROR", &format!("Request for {} failed after 3 attempts: {}", domain, err_msg));
+        
         let err_str = if let Some(e) = last_err {
             let msg = e.to_string();
             if msg.contains("connection closed") { "Error (Conn Closed)".to_string() }
@@ -730,7 +753,7 @@ async fn handle_query(
             "Error (Unknown)".to_string()
         };
         add_query_log(domain, err_str);
-        Err(anyhow::anyhow!("Request failed"))
+        Err(anyhow::anyhow!("Request failed: {}", err_msg))
     }
 }
 
@@ -857,9 +880,10 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
         .use_rustls_tls() 
         .danger_accept_invalid_certs(true) // Required for some ODoH proxies/relays
         .http2_adaptive_window(true)
-        .pool_idle_timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(8) 
-        .connect_timeout(Duration::from_secs(10));
+        .tcp_keepalive(Some(Duration::from_secs(60)))
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(16) 
+        .connect_timeout(Duration::from_secs(15));
 
     // Some proxies like Hiddify might have certificate issues (CA used as End Entity)
     if config.odoh_proxy_url.is_some() {
