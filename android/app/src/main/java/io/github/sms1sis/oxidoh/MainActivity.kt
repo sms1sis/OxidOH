@@ -146,9 +146,10 @@ class MainActivity : ComponentActivity() {
 
         val profiles = listOf(
             DnsProfile("Cloudflare via Fastly", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,1.1.1.1"),
+            DnsProfile("Cloudflare via Equinix", "https://odoh.cloudflare-dns.com/dns-query https://odoh.equinix.com/proxy", "139.178.64.1,1.1.1.1"),
+            DnsProfile("Cloudflare via SURF", "https://odoh.cloudflare-dns.com/dns-query https://odoh.surf.nl/proxy", "145.100.185.128,1.1.1.1"),
             DnsProfile("Crypto.sx via Fastly", "https://odoh.crypto.sx/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,172.67.140.94"),
             DnsProfile("Tiarap JP Direct", "https://doh.tiar.app/odoh", "174.138.29.175"),
-            DnsProfile("Tiarap.org Direct", "https://doh.tiarap.org/odoh", "174.138.29.175"),
             DnsProfile("Snowstorm Direct", "https://dope.snowstorm.love/dns-query", "1.1.1.1,8.8.8.8"),
             DnsProfile("Custom ODoH", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1")
         )

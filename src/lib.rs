@@ -306,6 +306,28 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         }
     }
 
+    // Background task to refresh ODoH config periodically (every 1 hour)
+    let config_refresh_handle = {
+        let client = client.clone();
+        let target_url = config.odoh_target_url.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                native_log("INFO", "Periodically refreshing ODoH config...");
+                match fetch_odoh_config(&client, &target_url).await {
+                    Ok(c) => {
+                        if let Ok(mut w) = ODOH_CONFIG.write() {
+                            *w = Some(c);
+                            native_log("INFO", "ODoH config refreshed successfully");
+                        }
+                    }
+                    Err(e) => native_log("WARN", &format!("Failed to refresh ODoH config: {:?}", e)),
+                }
+            }
+        })
+    };
+
     let send_url = if let Some(proxy_url) = &config.odoh_proxy_url {
         let target_url = Url::parse(&config.odoh_target_url).context("Failed to parse target URL")?;
         let connector = if proxy_url.contains('?') { "&" } else { "?" };
@@ -417,14 +439,17 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
             native_log("INFO", "Shutting down: Aborting loops");
             udp_loop.abort();
             tcp_loop.abort();
+            config_refresh_handle.abort();
         },
         _ = &mut udp_loop => {
             native_log("WARN", "UDP loop exited unexpectedly");
             tcp_loop.abort();
+            config_refresh_handle.abort();
         },
         _ = &mut tcp_loop => {
             native_log("WARN", "TCP loop exited unexpectedly");
             udp_loop.abort();
+            config_refresh_handle.abort();
         },
     }
     Ok(())
@@ -454,12 +479,12 @@ async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<Obliviou
 
     for url in urls {
         for attempt in 0..2 {
-            let ua = if attempt == 0 { "dnscrypt-proxy" } else { "oxidoh/0.1.1" };
+            let ua = if attempt == 0 { "dnscrypt-proxy" } else { "oxidoh/0.4.0" };
             native_log("DEBUG", &format!("Trying odohconfigs from {} (UA: {})", url, ua));
             
             let resp = client.get(&url)
                 .header("User-Agent", ua)
-                .header("Accept", "application/oblivious-dns-message-config, application/octet-stream, application/binary, */*")
+                .header("Accept", "application/oblivious-dns-message-config, application/octet-stream")
                 .header("Cache-Control", "no-cache, max-age=0")
                 .timeout(Duration::from_secs(5))
                 .send()
@@ -568,15 +593,19 @@ async fn handle_query(
     getrandom::fill(&mut seed_bytes).unwrap();
     let mut rng = StdRng::from_seed(seed_bytes);
     
-    // Use padding (e.g., 32) to satisfy some stricter ODoH targets
-    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, 32); 
+    // RFC 9230: Clients MUST pad DNS queries to hide the original size.
+    // Padding to nearest power of 2 or multiple of 128 is a common strategy.
+    let padded_len = if data.len() <= 128 { 128 } else { data.len().next_power_of_two() };
+    let padding = padded_len.saturating_sub(data.len());
+    
+    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, padding as u16); 
     let config_contents: ObliviousDoHConfigContents = odoh_config.into();
     let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?; 
     
     let req_bytes = compose(&encrypted_query_msg)?.freeze(); 
 
     let start = std::time::Instant::now();
-    native_log("DEBUG", &format!("Sending ODoH query for {} to {}", domain, resolver_url));
+    native_log("DEBUG", &format!("Sending ODoH query for {} to {} (padded to {} bytes)", domain, resolver_url, padded_len));
     
     let mut last_err = None;
     let mut final_resp = None;
@@ -589,7 +618,7 @@ async fn handle_query(
         let resp = client.post(&*resolver_url)
             .header("content-type", "application/oblivious-dns-message")
             .header("accept", "application/oblivious-dns-message")
-            .header("user-agent", "dnscrypt-proxy")
+            .header("user-agent", "oxidoh/0.4.0")
             .header("proxy-connection", "keep-alive")
             .header("cache-control", "no-cache")
             .body(req_bytes.clone())
@@ -609,12 +638,19 @@ async fn handle_query(
                      let mut get_url = Url::parse(&*resolver_url)?;
                      get_url.query_pairs_mut().append_pair("dns", &b64_query);
                      
-                     native_log("INFO", &format!("Trying GET fallback: {}", get_url));
-                     retry_resp = client.get(get_url)
-                        .header("accept", "application/oblivious-dns-message")
-                        .header("user-agent", "dnscrypt-proxy")
-                        .send()
-                        .await;
+                                      native_log("INFO", &format!("Trying GET fallback: {}", get_url));
+                     
+                                      retry_resp = client.get(get_url)
+                     
+                                         .header("accept", "application/oblivious-dns-message")
+                     
+                                         .header("user-agent", "oxidoh/0.4.0")
+                     
+                                         .send()
+                     
+                                         .await;
+                     
+                     
                  } else if let Some(ref base_proxy) = proxy_url_str {
                      // Try path-based fallback
                      let target_url = Url::parse(&*target_url_str).unwrap();
@@ -623,14 +659,15 @@ async fn handle_query(
                         target_url.host_str().unwrap_or(""), 
                         target_url.path()
                      );
-                     native_log("INFO", &format!("Path-based fallback URL: {}", fallback_url));
-                     retry_resp = client.post(&fallback_url)
-                        .header("content-type", "application/oblivious-dns-message")
-                        .header("accept", "application/oblivious-dns-message")
-                        .header("user-agent", "dnscrypt-proxy")
-                        .body(req_bytes.clone())
-                        .send()
-                        .await;
+                                      native_log("INFO", &format!("Path-based fallback URL: {}", fallback_url));
+                                      retry_resp = client.post(&fallback_url)
+                                         .header("content-type", "application/oblivious-dns-message")
+                                         .header("accept", "application/oblivious-dns-message")
+                                         .header("user-agent", "oxidoh/0.4.0")
+                                         .body(req_bytes.clone())
+                                         .send()
+                                         .await;
+                     
                  }
             }
         }
