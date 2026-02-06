@@ -144,19 +144,18 @@ class MainActivity : ComponentActivity() {
         var pendingTcpLimit by remember { mutableStateOf(tcpLimit) }
         var pendingPollInterval by remember { mutableStateOf(pollInterval) }
 
-        val profiles = listOf(
-            DnsProfile("Cloudflare via Fastly", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,1.1.1.1"),
-            DnsProfile("Cloudflare via Equinix", "https://odoh.cloudflare-dns.com/dns-query https://odoh.equinix.com/proxy", "139.178.64.1,1.1.1.1"),
-            DnsProfile("Cloudflare via SURF", "https://odoh.cloudflare-dns.com/dns-query https://odoh.surf.nl/proxy", "145.100.185.128,1.1.1.1"),
-            DnsProfile("Crypto.sx via Fastly", "https://odoh.crypto.sx/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,172.67.140.94"),
-            DnsProfile("Tiarap JP Direct", "https://doh.tiar.app/odoh", "174.138.29.175"),
-            DnsProfile("Snowstorm Direct", "https://dope.snowstorm.love/dns-query", "1.1.1.1,8.8.8.8"),
-            DnsProfile("Custom ODoH", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1")
-        )
+                val profiles = listOf(
+                    DnsProfile("Cloudflare via Fastly", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,1.1.1.1"),
+                    DnsProfile("Cloudflare via Equinix", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.equinix.com/proxy", "139.178.64.1,1.1.1.1"),
+                    DnsProfile("Cloudflare via SURF", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.surf.nl/proxy", "145.100.185.128,1.1.1.1"),
+                    DnsProfile("Crypto.sx via Fastly", "https://odoh.crypto.sx/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,172.67.140.94"),
+                    DnsProfile("Tiarap JP Direct", "https://doh.tiar.app/odoh", "174.138.29.175"),
+                    DnsProfile("Snowstorm Direct", "https://dope.snowstorm.love/dns-query", "1.1.1.1,8.8.8.8"),
+                    DnsProfile("Custom ODoH", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1")
+                )
         
-        var selectedProfileIndex by remember { mutableStateOf(prefs.getInt("selected_profile", 0)) }
-
-        // Active settings (Source of truth for Service/Prefs)
+                var selectedProfileIndex by remember { mutableStateOf(prefs.getInt("selected_profile", 0)) }
+                // Active settings (Source of truth for Service/Prefs)
         var resolverUrl by remember { mutableStateOf(prefs.getString("resolver_url", profiles[selectedProfileIndex].url) ?: profiles[selectedProfileIndex].url) }
         var bootstrapDns by remember { mutableStateOf(prefs.getString("bootstrap_dns", profiles[selectedProfileIndex].bootstrap) ?: profiles[selectedProfileIndex].bootstrap) }
         var listenPort by remember { mutableStateOf(prefs.getString("listen_port", "5053") ?: "5053") }
