@@ -13,7 +13,7 @@ class BootReceiver : BroadcastReceiver() {
             
             if (autoStart) {
                 val serviceIntent = Intent(context, ProxyService::class.java).apply {
-                    putExtra("resolverUrl", prefs.getString("resolver_url", "https://cloudflare-dns.com/dns-query"))
+                    putExtra("resolverUrl", prefs.getString("resolver_url", "https://odoh.cloudflare-dns.com/dns-query"))
                     putExtra("listenPort", prefs.getString("listen_port", "5053")?.toIntOrNull() ?: 5053)
                     putExtra("bootstrapDns", prefs.getString("bootstrap_dns", "1.1.1.1"))
                     putExtra("heartbeatEnabled", prefs.getBoolean("heartbeat_enabled", true))

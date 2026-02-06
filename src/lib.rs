@@ -580,72 +580,61 @@ async fn handle_query(
         }
     }
 
-    let mut odoh_config_opt = {
-        let lock = ODOH_CONFIG.read().map_err(|_| anyhow::anyhow!("Lock error"))?;
-        lock.as_ref().cloned()
-    };
-
-    if odoh_config_opt.is_none() {
-        native_log("WARN", "ODoH Config missing in handle_query, attempting on-demand fetch...");
-        match fetch_odoh_config(&client, &*target_url_str).await {
-            Ok(c) => {
-                if let Ok(mut w) = ODOH_CONFIG.write() {
-                    *w = Some(c.clone());
-                }
-                odoh_config_opt = Some(c);
-            }
-            Err(e) => {
-                add_query_log(domain, "Error (Config Fetch Failed)".to_string());
-                return Err(anyhow::anyhow!("Failed to fetch ODoH config on-demand: {:?}", e));
-            }
-        }
-    }
-
-    let odoh_config = odoh_config_opt.unwrap();
-    
-    let mut seed_bytes = [0u8; 32];
-    getrandom::fill(&mut seed_bytes).unwrap();
-    let mut rng = StdRng::from_seed(seed_bytes);
-    
-    // RFC 9230: Clients MUST pad DNS queries to hide the original size.
-    // Padding to nearest power of 2 or multiple of 128 is a common strategy.
-    let padded_len = if data.len() <= 128 { 128 } else { data.len().next_power_of_two() };
-    let padding = padded_len.saturating_sub(data.len());
-    
-    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, padding); 
-    let config_contents: ObliviousDoHConfigContents = odoh_config.into();
-    let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?; 
-    
-    let req_bytes = compose(&encrypted_query_msg)?.freeze(); 
-
     let start = std::time::Instant::now();
-    native_log("DEBUG", &format!("Sending ODoH query for {} to {} (padded to {} bytes)", domain, resolver_url, padded_len));
-    
     let mut last_err = None;
     let mut final_resp = None;
 
     for attempt in 1..=3 {
         if attempt > 1 {
-            tokio::time::sleep(Duration::from_millis(50)).await; // Fast retry
+            tokio::time::sleep(Duration::from_millis(100 * (attempt - 1))).await;
         }
 
-        let resp_future = client.post(&*resolver_url)
+        let mut odoh_config_opt = {
+            let lock = ODOH_CONFIG.read().map_err(|_| anyhow::anyhow!("Lock error"))?;
+            lock.as_ref().cloned()
+        };
+
+        if odoh_config_opt.is_none() {
+            native_log("WARN", "ODoH Config missing in handle_query, attempting on-demand fetch...");
+            match fetch_odoh_config(&client, &*target_url_str).await {
+                Ok(c) => {
+                    if let Ok(mut w) = ODOH_CONFIG.write() {
+                        *w = Some(c.clone());
+                    }
+                    odoh_config_opt = Some(c);
+                }
+                Err(e) => {
+                    add_query_log(domain.clone(), "Error (Config Fetch Failed)".to_string());
+                    last_err = Some(e);
+                    continue;
+                }
+            }
+        }
+
+        let odoh_config = odoh_config_opt.unwrap();
+        let mut seed_bytes = [0u8; 32];
+        getrandom::fill(&mut seed_bytes).unwrap();
+        let mut rng = StdRng::from_seed(seed_bytes);
+        
+        let padded_len = if data.len() <= 128 { 128 } else { data.len().next_power_of_two() };
+        let padding = padded_len.saturating_sub(data.len());
+        
+        let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, padding); 
+        let config_contents: ObliviousDoHConfigContents = odoh_config.into();
+        let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?; 
+        let req_bytes = compose(&encrypted_query_msg)?.freeze(); 
+
+        native_log("DEBUG", &format!("Sending ODoH query for {} to {} (padded to {} bytes, attempt {})", domain, resolver_url, padded_len, attempt));
+
+        let resp = client.post(&*resolver_url)
             .header("content-type", "application/oblivious-dns-message")
             .header("accept", "application/oblivious-dns-message")
             .header("user-agent", "oxidoh/0.2.1")
             .header("proxy-connection", "keep-alive")
             .header("cache-control", "no-cache")
             .body(req_bytes.clone())
-            .send();
-            
-        // Individual attempt timeout
-        let resp = match tokio::time::timeout(Duration::from_secs(4), resp_future).await {
-            Ok(res) => res,
-            Err(_) => {
-                last_err = Some(anyhow::anyhow!("Attempt {} timed out", attempt));
-                continue;
-            }
-        };
+            .send()
+            .await;
 
         // Fallback logic for different relay styles
         let mut retry_resp = resp;
@@ -892,9 +881,9 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
         .danger_accept_invalid_certs(true) // Required for some ODoH proxies/relays
         .http2_adaptive_window(true)
         .tcp_keepalive(Some(Duration::from_secs(60)))
-        .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(32) 
-        .connect_timeout(Duration::from_secs(5));
+        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(16) 
+        .connect_timeout(Duration::from_secs(15));
 
     // Some proxies like Hiddify might have certificate issues (CA used as End Entity)
     if config.odoh_proxy_url.is_some() {

@@ -149,6 +149,7 @@ class MainActivity : ComponentActivity() {
                     DnsProfile("Cloudflare via Equinix", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.equinix.com/proxy", "139.178.64.1,1.1.1.1"),
                     DnsProfile("Cloudflare via SURF", "https://odoh.cloudflare-dns.com/dns-query https://odoh-relay.surf.nl/proxy", "145.100.185.128,1.1.1.1"),
                     DnsProfile("Crypto.sx via Fastly", "https://odoh.crypto.sx/dns-query https://odoh-relay.edgecompute.app/proxy", "151.101.1.51,172.67.140.94"),
+                    DnsProfile("Cloudflare Direct", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1"),
                     DnsProfile("Tiarap JP Direct", "https://doh.tiar.app/odoh", "174.138.29.175"),
                     DnsProfile("Snowstorm Direct", "https://dope.snowstorm.love/dns-query", "1.1.1.1,8.8.8.8"),
                     DnsProfile("Custom ODoH", "https://odoh.cloudflare-dns.com/dns-query", "1.1.1.1")

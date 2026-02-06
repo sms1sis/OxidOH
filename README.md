@@ -39,6 +39,7 @@ Select from verified high-reliability profiles:
 - **Cloudflare via Equinix:** High-performance relaying through Equinix infrastructure.
 - **Cloudflare via SURF:** Regional relaying via the SURF educational network.
 - **Crypto.sx via Fastly:** Community-maintained privacy target with Fastly relaying.
+- **Cloudflare Direct:** Direct connection to Cloudflare (Fastest, no relay).
 - **Tiarap JP / Snowstorm:** Independent high-privacy targets for direct connection.
 
 The app automatically handles ODoH configuration fetching, performs on-demand refreshes if keys expire (401 errors), and maintains a heartbeat to ensure the proxy is always active.
@@ -53,9 +54,10 @@ The application offers several connection profiles. Selecting a **Relayed** prof
 | **Cloudflare via Equinix** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Cloudflare using Equinix's global infrastructure. |
 | **Cloudflare via SURF** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Cloudflare using SURF's secure research network. |
 | **Crypto.sx via Fastly** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Crypto.sx using Fastly's global edge network. |
+| **Cloudflare Direct** | Direct | High (Encryption) | Direct connection to Cloudflare (Resolver sees your IP). |
 | **Tiarap JP Direct** | Direct | High (Encryption) | Direct connection to Tiarap's Japan-based privacy resolver. |
 | **Snowstorm Direct** | Direct | High (Encryption) | Community-driven independent DNS for decentralization. |
-| **Custom ODoH** | Direct | High (Encryption) | Direct connection to Cloudflare (Resolver sees your IP). |
+| **Custom ODoH** | Direct/Relay | High (Encryption) | Manually configure a custom ODoH target and optional relay. |
 
 ### The 6 Requirements for "Real" ODoH
 This app is designed to fulfill all requirements for true Oblivious DNS-over-HTTPS in Relayed mode:
