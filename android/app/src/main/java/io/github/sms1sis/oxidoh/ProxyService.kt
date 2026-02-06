@@ -63,8 +63,8 @@ class ProxyService : VpnService() {
             when (level) {
                 "ERROR" -> Log.e(tag, message)
                 "WARN" -> Log.w(tag, message)
-                "INFO" -> Log.i(tag, message)
-                else -> Log.d(tag, message)
+                "INFO" -> if (BuildConfig.DEBUG) Log.i(tag, message)
+                else -> if (BuildConfig.DEBUG) Log.d(tag, message)
             }
         }
 
@@ -92,7 +92,7 @@ class ProxyService : VpnService() {
     private val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: android.net.Network) {
             super.onAvailable(network)
-            Log.d(TAG, "Network available")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Network available")
         }
     }
 
@@ -143,7 +143,7 @@ class ProxyService : VpnService() {
         val heartbeatInterval = intent?.getLongExtra("heartbeatInterval", -1L).takeIf { it != null && it != -1L }
             ?: prefs.getString("heartbeat_interval", "10")?.toLongOrNull() ?: 10L
 
-        Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl")
+        if (BuildConfig.DEBUG) Log.d(TAG, "onStartCommand: vpnReady=${vpnInterface != null}, url=$resolverUrl")
 
         if (vpnInterface != null) {
             val configChanged = runningPort != listenPort || runningUrl != resolverUrl || 
@@ -152,7 +152,7 @@ class ProxyService : VpnService() {
                                runningHttp3 != useHttp3 || runningHeartbeatDomain != heartbeatDomain
             
             if (configChanged) {
-                Log.d(TAG, "Dynamic config change detected. Restarting backend...")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Dynamic config change detected. Restarting backend...")
                 stopProxy()
                 
                 runningPort = listenPort
@@ -166,17 +166,17 @@ class ProxyService : VpnService() {
                 
                 serviceScope.launch {
                     delay(1000)
-                    Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort")
                     val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain)
-                    Log.d(TAG, "Backend proxy initialized (result: $res)")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Backend proxy initialized (result: $res)")
                     
                     if (heartbeatEnabled) {
-                        Log.d(TAG, "Triggering post-restart heartbeat")
+                        if (BuildConfig.DEBUG) Log.d(TAG, "Triggering post-restart heartbeat")
                         startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
                     }
                 }
             } else {
-                Log.d(TAG, "No config change, refreshing heartbeat only")
+                if (BuildConfig.DEBUG) Log.d(TAG, "No config change, refreshing heartbeat only")
                 if (heartbeatEnabled) {
                     startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
                 } else {
@@ -197,7 +197,7 @@ class ProxyService : VpnService() {
         runningHeartbeatDomain = heartbeatDomain
 
         serviceScope.launch {
-            Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
             startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain)
         }
 
@@ -223,10 +223,10 @@ class ProxyService : VpnService() {
                 }
                 .establish()
             
-            Log.d(TAG, "VPN Interface established (IPv6: $allowIpv6)")
+            if (BuildConfig.DEBUG) Log.d(TAG, "VPN Interface established (IPv6: $allowIpv6)")
             forwardJob = serviceScope.launch { 
                 delay(1000)
-                Log.d(TAG, "Starting packet forwarding loop on port $listenPort")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Starting packet forwarding loop on port $listenPort")
                 forwardPackets(listenPort) 
             }
             
@@ -249,12 +249,12 @@ class ProxyService : VpnService() {
             val socket = DatagramSocket()
             val address = InetAddress.getByName("127.0.0.1")
             val query = constructDnsQuery(domain)
-            Log.d(TAG, "Starting heartbeat loop for $domain on port $port")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Starting heartbeat loop for $domain on port $port")
             try {
                 while (isActive && isProxyRunning && currentHeartbeatDomain == domain) {
                     val packet = DatagramPacket(query, query.size, address, port)
                     socket.send(packet)
-                    Log.d(TAG, "Sent heartbeat ping to localhost:$port") 
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Sent heartbeat ping to localhost:$port") 
                     delay(interval * 1000)
                 }
             } catch (e: Exception) {
@@ -263,7 +263,7 @@ class ProxyService : VpnService() {
                 }
             } finally {
                 socket.close()
-                Log.d(TAG, "Heartbeat loop stopped")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Heartbeat loop stopped")
             }
         }
     }

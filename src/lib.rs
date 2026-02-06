@@ -98,8 +98,11 @@ static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock:
 });
 
 fn native_log(level: &str, msg: &str) {
-    if level == "DEBUG" && !cfg!(debug_assertions) {
-        return;
+    if !cfg!(debug_assertions) {
+        match level {
+            "ERROR" | "WARN" => {} // Allow these
+            _ => return, // Silence everything else (INFO, DEBUG)
+        }
     }
     let _ = NATIVE_LOG_SENDER.send(NativeLog {
         level: level.to_string(),

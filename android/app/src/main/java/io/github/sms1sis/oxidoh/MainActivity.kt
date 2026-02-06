@@ -232,7 +232,7 @@ class MainActivity : ComponentActivity() {
                 if (isRunning) {
                     val newLat = ProxyService.getLatency()
                     if (newLat > 0 && newLat != latency) {
-                        Log.d("OxidOH", "UI Latency update: $newLat ms")
+                        if (BuildConfig.DEBUG) Log.d("OxidOH", "UI Latency update: $newLat ms")
                         latency = newLat
                     }
                     logs = ProxyService.getLogs()
