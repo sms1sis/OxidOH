@@ -5,7 +5,7 @@ A Rust implementation of an Oblivious DNS over HTTPS (ODoH) proxy for Android, f
 ## Features
 
 - **Rust-Powered Proxy:** High-performance ODoH backend for enhanced privacy.
-- **Robust Config Fetching:** Implements RFC 9230 with multi-path fallbacks, automatic retries (5 attempts), and rotated User-Agents (oxidoh/0.2.0).
+- **Robust Config Fetching:** Implements RFC 9230 with multi-path fallbacks, automatic retries (5 attempts), and rotated User-Agents (oxidoh/0.2.1).
 - **Verified Service Providers:** Curated list of high-reliability ODoH targets and relays (Cloudflare, Tiarap, Snowstorm).
 - **Dynamic Service Switching:** Optimized background service for seamless switching between providers.
 - **Hexagonal Branding:** Custom hexagonal launcher and notification icons for a modern look.

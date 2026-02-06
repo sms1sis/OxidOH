@@ -481,7 +481,7 @@ async fn fetch_odoh_config(client: &Client, target_url: &str) -> Result<Obliviou
 
     for url in urls {
         for attempt in 0..2 {
-            let ua = if attempt == 0 { "dnscrypt-proxy" } else { "oxidoh/0.2.0" };
+            let ua = if attempt == 0 { "dnscrypt-proxy" } else { "oxidoh/0.2.1" };
             native_log("DEBUG", &format!("Trying odohconfigs from {} (UA: {})", url, ua));
             
             let resp = client.get(&url)
@@ -632,7 +632,7 @@ async fn handle_query(
         let resp_future = client.post(&*resolver_url)
             .header("content-type", "application/oblivious-dns-message")
             .header("accept", "application/oblivious-dns-message")
-            .header("user-agent", "oxidoh/0.2.0")
+            .header("user-agent", "oxidoh/0.2.1")
             .header("proxy-connection", "keep-alive")
             .header("cache-control", "no-cache")
             .body(req_bytes.clone())
@@ -666,7 +666,7 @@ async fn handle_query(
                      
                                          .header("accept", "application/oblivious-dns-message")
                      
-                                         .header("user-agent", "oxidoh/0.2.0")
+                                         .header("user-agent", "oxidoh/0.2.1")
                      
                                          .send()
                      
@@ -685,7 +685,7 @@ async fn handle_query(
                                       retry_resp = client.post(&fallback_url)
                                          .header("content-type", "application/oblivious-dns-message")
                                          .header("accept", "application/oblivious-dns-message")
-                                         .header("user-agent", "oxidoh/0.2.0")
+                                         .header("user-agent", "oxidoh/0.2.1")
                                          .body(req_bytes.clone())
                                          .send()
                                          .await;
@@ -886,7 +886,7 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, 
 
 fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Client> {
     let mut builder = Client::builder()
-        .user_agent("OxidOH/0.2.0")
+        .user_agent("OxidOH/0.2.1")
         .dns_resolver(resolver)
         .use_rustls_tls() 
         .danger_accept_invalid_certs(true) // Required for some ODoH proxies/relays

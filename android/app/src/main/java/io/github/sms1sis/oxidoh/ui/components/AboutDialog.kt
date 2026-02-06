@@ -66,7 +66,7 @@ fun AboutDialog(onDismiss: () -> Unit, uriHandler: androidx.compose.ui.platform.
 
 private suspend fun checkForUpdates(context: android.content.Context, uriHandler: androidx.compose.ui.platform.UriHandler) {
     val repoUrl = "https://api.github.com/repos/sms1sis/OxidOH/releases/latest"
-    val currentVersion = "v0.2.0"
+    val currentVersion = "v0.2.1"
 
     withContext(Dispatchers.IO) {
         try {
