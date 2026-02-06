@@ -988,6 +988,11 @@ pub mod jni_api {
         let odoh_target_url = urls[0].clone();
         let odoh_proxy_url = if urls.len() > 1 { Some(urls[1].clone()) } else { None };
 
+        // Clear existing ODoH config to ensure a fresh fetch for the new provider
+        if let Ok(mut w) = ODOH_CONFIG.write() {
+            *w = None;
+        }
+
         native_log("INFO", &format!("startProxy: addr={}, port={}, target={}, proxy={:?}", listen_addr, listen_port, odoh_target_url, odoh_proxy_url));
 
         let config = Config {
