@@ -5,7 +5,7 @@ A Rust implementation of an Oblivious DNS over HTTPS (ODoH) proxy for Android, f
 ## Features
 
 - **Rust-Powered Proxy:** High-performance ODoH backend for enhanced privacy.
-- **Robust Config Fetching:** Implements RFC 9230 with multi-path fallbacks, automatic retries (5 attempts), and rotated User-Agents (oxidoh/0.1.1).
+- **Robust Config Fetching:** Implements RFC 9230 with multi-path fallbacks, automatic retries (5 attempts), and rotated User-Agents (oxidoh/0.2.0).
 - **Verified Service Providers:** Curated list of high-reliability ODoH targets and relays (Cloudflare, Tiarap, Snowstorm).
 - **Dynamic Service Switching:** Optimized background service for seamless switching between providers.
 - **Hexagonal Branding:** Custom hexagonal launcher and notification icons for a modern look.
@@ -35,12 +35,13 @@ A Rust implementation of an Oblivious DNS over HTTPS (ODoH) proxy for Android, f
 ## Usage
 
 Select from verified high-reliability profiles:
-- **Cloudflare Direct:** Optimized for speed and privacy.
-- **Cloudflare via Tiarap:** Regional proxying for enhanced obfuscation.
-- **Cloudflare via Fastly:** Global relaying via Fastly's edge compute.
-- **Tiarap / Snowstorm:** Independent high-privacy targets.
+- **Cloudflare via Fastly:** Global relaying via Fastly's edge compute (Default).
+- **Cloudflare via Equinix:** High-performance relaying through Equinix infrastructure.
+- **Cloudflare via SURF:** Regional relaying via the SURF educational network.
+- **Crypto.sx via Fastly:** Community-maintained privacy target with Fastly relaying.
+- **Tiarap JP / Snowstorm:** Independent high-privacy targets for direct connection.
 
-The app automatically handles ODoH configuration fetching and maintains a heartbeat to ensure the proxy is always active.
+The app automatically handles ODoH configuration fetching, performs on-demand refreshes if keys expire (401 errors), and maintains a heartbeat to ensure the proxy is always active.
 
 ## ODoH Profiles & Privacy
 
@@ -48,11 +49,13 @@ The application offers several connection profiles. Selecting a **Relayed** prof
 
 | Profile | Type | Privacy Level | Use Case |
 | :--- | :--- | :--- | :--- |
-| **Cloudflare Direct** | Direct | High (Encryption) | Maximum speed using Cloudflare's global network. Resolver sees your IP. |
-| **Cloudflare via Tiarap** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Cloudflare using Tiarap's Japan-based relay. |
 | **Cloudflare via Fastly** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Cloudflare using Fastly's global edge network. |
-| **Tiarap Direct** | Direct | High (Encryption) | Direct connection to Tiarap's privacy-focused resolver. |
+| **Cloudflare via Equinix** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Cloudflare using Equinix's global infrastructure. |
+| **Cloudflare via SURF** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Cloudflare using SURF's secure research network. |
+| **Crypto.sx via Fastly** | **Relayed** | **Maximum (Oblivious)** | Hides your IP from Crypto.sx using Fastly's global edge network. |
+| **Tiarap JP Direct** | Direct | High (Encryption) | Direct connection to Tiarap's Japan-based privacy resolver. |
 | **Snowstorm Direct** | Direct | High (Encryption) | Community-driven independent DNS for decentralization. |
+| **Custom ODoH** | Direct | High (Encryption) | Direct connection to Cloudflare (Resolver sees your IP). |
 
 ### The 6 Requirements for "Real" ODoH
 This app is designed to fulfill all requirements for true Oblivious DNS-over-HTTPS in Relayed mode:

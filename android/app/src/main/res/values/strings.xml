@@ -60,7 +60,7 @@
 
     <!-- About Dialog -->
     <string name="about_title">About OxidOH</string>
-    <string name="version_info">Version: v0.1.1</string>
+    <string name="version_info">Version: v0.2.0</string>
     <string name="developer_info">Developer: sms1sis</string>
     <string name="check_updates">Check for Updates</string>
     <string name="checking">Checking...</string>
