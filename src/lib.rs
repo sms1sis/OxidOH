@@ -7,7 +7,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use reqwest::{Client, Url};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, mpsc};
-use tracing::debug;
 
 use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -598,7 +597,7 @@ async fn handle_query(
     let padded_len = if data.len() <= 128 { 128 } else { data.len().next_power_of_two() };
     let padding = padded_len.saturating_sub(data.len());
     
-    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, padding as u16); 
+    let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, padding); 
     let config_contents: ObliviousDoHConfigContents = odoh_config.into();
     let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?; 
     

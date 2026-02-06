@@ -1,5 +1,6 @@
 package io.github.sms1sis.oxidoh.ui.screens
 
+import android.content.ClipData
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.layout.*
@@ -16,20 +17,22 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.sms1sis.oxidoh.ProxyService
 import io.github.sms1sis.oxidoh.R
+import kotlinx.coroutines.launch
 
 @Composable
 fun LogScreen(logs: Array<String>) {
     val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     
     LaunchedEffect(logs.size) {
@@ -67,8 +70,10 @@ fun LogScreen(logs: Array<String>) {
                     onClick = { 
                         if (logs.isNotEmpty()) {
                             val logText = logs.joinToString("\n")
-                            clipboardManager.setText(AnnotatedString(logText))
-                            android.widget.Toast.makeText(context, context.getString(R.string.logs_copied), android.widget.Toast.LENGTH_SHORT).show()
+                            scope.launch {
+                                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("OxidOH Logs", logText)))
+                                android.widget.Toast.makeText(context, context.getString(R.string.logs_copied), android.widget.Toast.LENGTH_SHORT).show()
+                            }
                         }
                     },
                     color = MaterialTheme.colorScheme.secondaryContainer,
@@ -142,8 +147,7 @@ private fun saveLogsToFile(context: Context, logs: Array<String>) {
         val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
         val file = java.io.File(downloadsDir, fileName)
         java.io.FileOutputStream(file).use { out ->
-            logs.forEach { line -> out.write((line + "
-").toByteArray()) }
+            logs.forEach { line -> out.write((line + "\n").toByteArray()) }
         }
         android.media.MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
         val msg = context.getString(R.string.saved_to_downloads)

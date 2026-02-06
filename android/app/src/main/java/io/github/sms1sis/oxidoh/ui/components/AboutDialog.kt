@@ -78,7 +78,7 @@ private suspend fun checkForUpdates(context: android.content.Context, uriHandler
 
             if (connection.responseCode == 200) {
                 val response = connection.inputStream.bufferedReader().use { it.readText() }
-                val tagName = response.substringAfter(""tag_name":"").substringBefore(""")
+                val tagName = response.substringAfter("\"tag_name\":\"").substringBefore("\"")
                 
                 withContext(Dispatchers.Main) {
                     if (tagName != currentVersion && tagName.startsWith("v")) {
