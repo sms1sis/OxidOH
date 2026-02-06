@@ -1,3 +1,87 @@
 <resources>
     <string name="app_name">OxidOH</string>
-</resources>
+    <string name="notification_title">OxidOH Active</string>
+    <string name="notification_content">Protecting DNS queries (ODoH)</string>
+    
+    <!-- Themes -->
+    <string name="theme_system">System</string>
+    <string name="theme_light">Light</string>
+    <string name="theme_dark">Dark</string>
+    <string name="theme_amoled">AMOLED</string>
+
+    <!-- Dashboard -->
+    <string name="configuration">Configuration</string>
+    <string name="service_provider">Service Provider</string>
+    <string name="target_proxy_urls">ODoH Target &amp; Proxy URLs</string>
+    <string name="bootstrap">Bootstrap</string>
+    <string name="port">Port</string>
+    <string name="system_protected">SYSTEM PROTECTED</string>
+    <string name="unprotected">UNPROTECTED</string>
+    <string name="tap_to_disconnect">TAP SHIELD TO DISCONNECT</string>
+    <string name="tap_to_connect">TAP SHIELD TO CONNECT</string>
+
+    <!-- Logs -->
+    <string name="network_activity">Network Activity</string>
+    <string name="no_activity">No activity detected</string>
+    <string name="saved_to_downloads">Saved to Downloads</string>
+    <string name="failed_save_logs">Failed to save logs</string>
+    <string name="logs_copied">Logs copied to clipboard</string>
+    <string name="logs_cleared">Logs cleared</string>
+    <string name="copy_logs">Copy Logs</string>
+    <string name="clear_logs">Clear Logs</string>
+    <string name="save_logs">Save Logs</string>
+
+    <!-- Drawer / Preferences -->
+    <string name="preferences">Preferences</string>
+    <string name="appearance">Appearance</string>
+    <string name="notch_support">Notch Support</string>
+    <string name="edge_to_edge">Edge-to-edge display</string>
+    <string name="service">Service</string>
+    <string name="battery_optimization">Battery Optimization</string>
+    <string name="battery_opt_desc">Service might be killed in background. Tap to fix.</string>
+    <string name="auto_start">Auto-start</string>
+    <string name="auto_start_desc">Enable protection on boot</string>
+    <string name="ipv6_support">IPv6 Support</string>
+    <string name="ipv6_desc">Enable IPv6 DNS interception</string>
+    <string name="dns_cache_ttl">DNS Cache TTL (seconds)</string>
+    <string name="advanced_settings">Advanced Settings</string>
+    <string name="http3_quic">HTTP/3 (QUIC)</string>
+    <string name="http3_desc">Use modern high-speed protocol</string>
+    <string name="tcp_limit">TCP Client Limit</string>
+    <string name="bootstrap_refresh">Bootstrap Refresh (sec)</string>
+    <string name="latency_pulse">Latency Pulse</string>
+    <string name="latency_pulse_desc">Keep stats fresh in background</string>
+    <string name="ping_domain">Ping Domain</string>
+    <string name="interval_sec">Interval (sec)</string>
+    <string name="clear_dns_cache">Clear DNS Cache</string>
+    <string name="dns_cache_cleared">DNS Cache Cleared</string>
+    <string name="about_application">About Application</string>
+    <string name="battery_prompt">Disable battery optimization in Settings for better reliability</string>
+
+    <!-- About Dialog -->
+    <string name="about_title">About OxidOH</string>
+    <string name="version_info">Version: v0.1.1</string>
+    <string name="developer_info">Developer: sms1sis</string>
+    <string name="check_updates">Check for Updates</string>
+    <string name="checking">Checking...</string>
+    <string name="view_github">View on GitHub</string>
+    <string name="close">Close</string>
+    <string name="update_available">New version available: %1$s</string>
+    <string name="latest_version">You are on the latest version</string>
+    <string name="update_check_failed">Failed to check for updates</string>
+    
+        <!-- Tab Names -->
+    
+        <string name="tab_app">App</string>
+    
+        <string name="tab_activity">Activity</string>
+    
+        
+    
+        <!-- Quick Settings -->
+    
+        <string name="tile_label">OxidOH</string>
+    
+    </resources>
+    
+    

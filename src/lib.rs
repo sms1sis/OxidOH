@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{RwLock, mpsc};
 use tracing::debug;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::{VecDeque, HashMap};
 use std::sync::LazyLock;
@@ -21,6 +21,7 @@ use rand::SeedableRng;
 use std::io::Cursor;
 use jni::JavaVM;
 use jni::objects::JClass;
+use hickory_resolver::proto::op::Message;
 
 pub struct Stats {
     pub queries_udp: AtomicUsize,
@@ -149,9 +150,10 @@ pub struct Config {
     pub ca_path: Option<String>,
     pub statistic_interval: u64,
     pub cache_ttl: u64,
+    pub exclude_domain: Option<String>,
 }
 
-type DnsCache = Cache<Bytes, (Bytes, u32)>;
+type DnsCache = Cache<Bytes, (Bytes, Instant)>;
 
 #[derive(Clone)]
 struct DynamicResolver {
@@ -165,9 +167,9 @@ impl DynamicResolver {
         }
     }
 
-    async fn update(&self, domain: String, addr: SocketAddr) {
+    async fn update(&self, domain: String, addrs: Vec<SocketAddr>) {
         let mut hosts = self.hosts.write().await;
-        hosts.insert(domain, vec![addr]);
+        hosts.insert(domain, addrs);
     }
 }
 
@@ -247,35 +249,33 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let dynamic_resolver = DynamicResolver::new();
     // Also bootstrap one.one.one.one just in case Cloudflare Target uses it internally
     if let Ok(ip) = "1.1.1.1".parse::<IpAddr>() {
-        dynamic_resolver.update("one.one.one.one".to_string(), SocketAddr::new(ip, 443)).await;
+        dynamic_resolver.update("one.one.one.one".to_string(), vec![SocketAddr::new(ip, 443)]).await;
     }
 
     // Hardcoded fallbacks for common relays and targets
     if let Ok(ip) = "172.67.140.94".parse::<IpAddr>() {
-        dynamic_resolver.update("odoh-jp.tiarap.org".to_string(), SocketAddr::new(ip, 443)).await;
-        dynamic_resolver.update("odoh.crypto.sx".to_string(), SocketAddr::new(ip, 443)).await;
+        dynamic_resolver.update("odoh-jp.tiarap.org".to_string(), vec![SocketAddr::new(ip, 443)]).await;
+        dynamic_resolver.update("odoh.crypto.sx".to_string(), vec![SocketAddr::new(ip, 443)]).await;
     }
     if let Ok(ip) = "151.101.1.51".parse::<IpAddr>() {
-        dynamic_resolver.update("odoh-relay.edgecompute.app".to_string(), SocketAddr::new(ip, 443)).await;
+        dynamic_resolver.update("odoh-relay.edgecompute.app".to_string(), vec![SocketAddr::new(ip, 443)]).await;
     }
     if let Ok(ip) = "174.138.29.175".parse::<IpAddr>() {
-        dynamic_resolver.update("doh.tiarap.org".to_string(), SocketAddr::new(ip, 443)).await;
-        dynamic_resolver.update("jp.tiar.app".to_string(), SocketAddr::new(ip, 443)).await;
+        dynamic_resolver.update("doh.tiarap.org".to_string(), vec![SocketAddr::new(ip, 443)]).await;
+        dynamic_resolver.update("jp.tiar.app".to_string(), vec![SocketAddr::new(ip, 443)]).await;
     }
 
-    let ip = resolve_bootstrap(&target_domain, &config.bootstrap_dns, config.allow_ipv6, Some(&dynamic_resolver)).await?;
-    let ip_with_port = SocketAddr::new(ip.ip(), 443);
-    native_log("INFO", &format!("Bootstrapped Target {} to {}", target_domain, ip_with_port));
+    let ips = resolve_bootstrap(&target_domain, &config.bootstrap_dns, config.allow_ipv6, Some(&dynamic_resolver)).await?;
+    native_log("INFO", &format!("Bootstrapped Target {} to {:?}", target_domain, ips));
     
-    dynamic_resolver.update(target_domain.clone(), ip_with_port).await;
+    dynamic_resolver.update(target_domain.clone(), ips).await;
 
     if let Some(proxy_url) = &config.odoh_proxy_url {
         let proxy_url_parsed = Url::parse(proxy_url).context("Failed to parse ODoH Proxy URL")?;
         let proxy_domain = proxy_url_parsed.domain().context("Proxy URL must have a domain")?.to_string();
-        let proxy_ip = resolve_bootstrap(&proxy_domain, &config.bootstrap_dns, config.allow_ipv6, Some(&dynamic_resolver)).await?;
-        let proxy_ip_with_port = SocketAddr::new(proxy_ip.ip(), 443);
-        native_log("INFO", &format!("Bootstrapped Proxy {} to {}", proxy_domain, proxy_ip_with_port));
-        dynamic_resolver.update(proxy_domain, proxy_ip_with_port).await;
+        let proxy_ips = resolve_bootstrap(&proxy_domain, &config.bootstrap_dns, config.allow_ipv6, Some(&dynamic_resolver)).await?;
+        native_log("INFO", &format!("Bootstrapped Proxy {} to {:?}", proxy_domain, proxy_ips));
+        dynamic_resolver.update(proxy_domain, proxy_ips).await;
     }
 
     let client = create_client(&config, Arc::new(dynamic_resolver))?;
@@ -337,7 +337,8 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
 
     let target_url_str = Arc::new(config.odoh_target_url.clone());
     let proxy_url_str = config.odoh_proxy_url.as_ref().map(|s| Arc::new(s.clone()));
-    let cache_ttl = config.cache_ttl as u32;
+    let cache_ttl = config.cache_ttl;
+    let exclude_domain = config.exclude_domain.clone();
 
     let mut udp_loop = {
         let socket = udp_socket.clone();
@@ -347,6 +348,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         let proxy_url = proxy_url_str.clone();
         let stats = stats.clone();
         let cache = cache.clone();
+        let exclude_domain = exclude_domain.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
@@ -360,10 +362,11 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let proxy_url = proxy_url.clone();
                         let stats = stats.clone();
                         let cache = cache.clone();
+                        let exclude_domain = exclude_domain.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
                             native_log("DEBUG", &format!("Handling UDP query from {}", peer));
-                            if let Err(e) = handle_query(Some(socket), None, client, resolver_url, target_url, proxy_url, data, peer, stats, cache, cache_ttl).await {
+                            if let Err(e) = handle_query(Some(socket), None, client, resolver_url, target_url, proxy_url, data, peer, stats, cache, cache_ttl, exclude_domain).await {
                                 native_log("ERROR", &format!("UDP error: {}", e));
                             }
                         });
@@ -382,6 +385,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
          let proxy_url = proxy_url_str.clone();
          let stats = stats.clone();
          let cache = cache.clone();
+         let exclude_domain = exclude_domain.clone();
          tokio::spawn(async move {
             loop {
                 if let Ok((mut stream, peer)) = listener.accept().await {
@@ -391,6 +395,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                      let proxy_url = proxy_url.clone();
                      let stats = stats.clone();
                      let cache = cache.clone();
+                     let exclude_domain = exclude_domain.clone();
                      tokio::spawn(async move {
                          stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
                          let mut len_buf = [0u8; 2];
@@ -398,7 +403,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                              let len = u16::from_be_bytes(len_buf) as usize;
                              let mut data = vec![0u8; len];
                              if stream.read_exact(&mut data).await.is_ok() {
-                                 let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl).await;
+                                 let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl, exclude_domain).await;
                              }
                          }
                      });
@@ -514,19 +519,37 @@ async fn handle_query(
     peer: SocketAddr,
     stats: Arc<Stats>,
     cache: DnsCache,
-    cache_ttl: u32,
+    cache_ttl_default: u64,
+    exclude_domain: Option<String>,
 ) -> Result<()> {
-    let domain = extract_domain(&data);
+    if data.len() < 12 {
+        return Err(anyhow::anyhow!("DNS message too short"));
+    }
 
-    if data.len() > 2 {
+    let original_id = [data[0], data[1]];
+    let domain = extract_domain(&data);
+    let should_cache = if let Some(ref exclude) = exclude_domain {
+        !domain.eq_ignore_ascii_case(exclude)
+    } else {
+        true
+    };
+
+    if should_cache && data.len() > 2 {
         let cache_key = data.slice(2..);
-        if let Some((cached_resp, ttl)) = cache.get(&cache_key).await {
-             let mut resp = vec![0u8; cached_resp.len()];
-             resp.copy_from_slice(&cached_resp);
-             resp[0] = data[0];
-             resp[1] = data[1];
-             add_query_log(domain, format!("OK (Cache {})", ttl));
-             return send_response(udp_sock, tcp_stream, Bytes::from(resp), peer).await;
+        if let Some((cached_resp, expiry)) = cache.get(&cache_key).await {
+            if Instant::now() < expiry {
+                let remaining = expiry.duration_since(Instant::now()).as_secs();
+                let mut resp = vec![0u8; cached_resp.len()];
+                resp.copy_from_slice(&cached_resp);
+                // Restore original ID
+                resp[0] = original_id[0];
+                resp[1] = original_id[1];
+                
+                add_query_log(domain, format!("OK (Cache, TTL {})", remaining));
+                return send_response(udp_sock, tcp_stream, Bytes::from(resp), peer).await;
+            } else {
+                cache.invalidate(&cache_key).await;
+            }
         }
     }
 
@@ -542,7 +565,7 @@ async fn handle_query(
     };
     
     let mut seed_bytes = [0u8; 32];
-    getrandom::getrandom(&mut seed_bytes).unwrap();
+    getrandom::fill(&mut seed_bytes).unwrap();
     let mut rng = StdRng::from_seed(seed_bytes);
     
     // Use padding (e.g., 32) to satisfy some stricter ODoH targets
@@ -555,95 +578,123 @@ async fn handle_query(
     let start = std::time::Instant::now();
     native_log("DEBUG", &format!("Sending ODoH query for {} to {}", domain, resolver_url));
     
-    let mut resp = client.post(&*resolver_url)
-        .header("content-type", "application/oblivious-dns-message")
-        .header("accept", "application/oblivious-dns-message")
-        .header("user-agent", "dnscrypt-proxy")
-        .header("proxy-connection", "keep-alive")
-        .header("cache-control", "no-cache")
-        .body(req_bytes.clone())
-        .send()
-        .await;
+    let mut last_err = None;
+    let mut final_resp = None;
 
-    // Fallback logic for different relay styles
-    if let Ok(ref r) = resp {
-        let status = r.status();
-        if status == reqwest::StatusCode::METHOD_NOT_ALLOWED || status.as_u16() == 530 || status == reqwest::StatusCode::NOT_FOUND {
-             native_log("WARN", &format!("Relay returned {}, trying fallback...", status));
-             
-             if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
-                 // Try GET fallback
-                 let b64_query = URL_SAFE_NO_PAD.encode(&req_bytes);
-                 let mut get_url = Url::parse(&*resolver_url)?;
-                 get_url.query_pairs_mut().append_pair("dns", &b64_query);
+    for attempt in 1..=3 {
+        if attempt > 1 {
+            tokio::time::sleep(Duration::from_millis(100 * (attempt - 1))).await;
+        }
+
+        let resp = client.post(&*resolver_url)
+            .header("content-type", "application/oblivious-dns-message")
+            .header("accept", "application/oblivious-dns-message")
+            .header("user-agent", "dnscrypt-proxy")
+            .header("proxy-connection", "keep-alive")
+            .header("cache-control", "no-cache")
+            .body(req_bytes.clone())
+            .send()
+            .await;
+
+        // Fallback logic for different relay styles
+        let mut retry_resp = resp;
+        if let Ok(ref r) = retry_resp {
+            let status = r.status();
+            if status == reqwest::StatusCode::METHOD_NOT_ALLOWED || status.as_u16() == 530 || status == reqwest::StatusCode::NOT_FOUND {
+                 native_log("WARN", &format!("Relay returned {}, trying fallback...", status));
                  
-                 native_log("INFO", &format!("Trying GET fallback: {}", get_url));
-                 resp = client.get(get_url)
-                    .header("accept", "application/oblivious-dns-message")
-                    .header("user-agent", "dnscrypt-proxy")
-                    .send()
-                    .await;
-             } else if let Some(ref base_proxy) = proxy_url_str {
-                 // Try path-based fallback
-                 let target_url = Url::parse(&*target_url_str).unwrap();
-                 let fallback_url = format!("{}/{}{}", 
-                    base_proxy.trim_end_matches('/'), 
-                    target_url.host_str().unwrap_or(""), 
-                    target_url.path()
-                 );
-                 native_log("INFO", &format!("Path-based fallback URL: {}", fallback_url));
-                 resp = client.post(&fallback_url)
-                    .header("content-type", "application/oblivious-dns-message")
-                    .header("accept", "application/oblivious-dns-message")
-                    .header("user-agent", "dnscrypt-proxy")
-                    .body(req_bytes.clone())
-                    .send()
-                    .await;
-             }
+                 if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+                     // Try GET fallback
+                     let b64_query = URL_SAFE_NO_PAD.encode(&req_bytes);
+                     let mut get_url = Url::parse(&*resolver_url)?;
+                     get_url.query_pairs_mut().append_pair("dns", &b64_query);
+                     
+                     native_log("INFO", &format!("Trying GET fallback: {}", get_url));
+                     retry_resp = client.get(get_url)
+                        .header("accept", "application/oblivious-dns-message")
+                        .header("user-agent", "dnscrypt-proxy")
+                        .send()
+                        .await;
+                 } else if let Some(ref base_proxy) = proxy_url_str {
+                     // Try path-based fallback
+                     let target_url = Url::parse(&*target_url_str).unwrap();
+                     let fallback_url = format!("{}/{}{}", 
+                        base_proxy.trim_end_matches('/'), 
+                        target_url.host_str().unwrap_or(""), 
+                        target_url.path()
+                     );
+                     native_log("INFO", &format!("Path-based fallback URL: {}", fallback_url));
+                     retry_resp = client.post(&fallback_url)
+                        .header("content-type", "application/oblivious-dns-message")
+                        .header("accept", "application/oblivious-dns-message")
+                        .header("user-agent", "dnscrypt-proxy")
+                        .body(req_bytes.clone())
+                        .send()
+                        .await;
+                 }
+            }
+        }
+
+        match retry_resp {
+            Ok(r) => {
+                if !r.status().is_success() {
+                    let status_code = r.status().as_u16();
+                    last_err = Some(anyhow::anyhow!("HTTP {}", status_code));
+                    continue;
+                }
+                let resp_bytes = r.bytes().await?;
+                
+                let mut response_cursor = Cursor::new(resp_bytes.clone());
+                let odoh_response: ObliviousDoHMessage = match parse(&mut response_cursor) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        native_log("ERROR", &format!("Failed to parse ODoH message: {:?}", e));
+                        last_err = Some(e.into());
+                        continue;
+                    }
+                };
+
+                let dns_resp_plaintext = decrypt_response(&query_plaintext, &odoh_response, client_secret)?;
+                let dns_resp = dns_resp_plaintext.into_msg().to_vec(); 
+                
+                let latency = start.elapsed().as_millis() as usize;
+                LAST_LATENCY.store(latency, Ordering::Relaxed);
+                add_query_log(domain.clone(), format!("OK ({}ms, att {})", latency, attempt));
+
+                if should_cache && data.len() > 2 && dns_resp.len() > 2 {
+                    let mut ttl = cache_ttl_default;
+                    if let Ok(msg) = Message::from_vec(&dns_resp) {
+                        ttl = msg.answers().iter().map(|a| a.ttl()).min().unwrap_or(cache_ttl_default as u32).into();
+                        if ttl < 10 { ttl = 10; }
+                        if ttl > 3600 { ttl = 3600; }
+                    }
+                    let expiry = Instant::now() + Duration::from_secs(ttl);
+                    cache.insert(data.slice(2..), (Bytes::copy_from_slice(&dns_resp), expiry)).await;
+                }
+                
+                final_resp = Some(dns_resp);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e.into());
+            }
         }
     }
 
-    match resp {
-        Ok(r) => {
-            native_log("DEBUG", &format!("Received ODoH response for {}: status={}", domain, r.status()));
-            if !r.status().is_success() {
-                let status_code = r.status().as_u16();
-                stats.errors.fetch_add(1, Ordering::Relaxed);
-                add_query_log(domain.clone(), format!("Error {}", status_code));
-                native_log("ERROR", &format!("ODoH Request failed for {} with status {}", domain, status_code));
-                return Err(anyhow::anyhow!("HTTP Error {}", status_code));
-            }
-            let resp_bytes = r.bytes().await?;
-            native_log("DEBUG", &format!("ODoH response body size: {} bytes. First 4 bytes: {:02x?}", resp_bytes.len(), &resp_bytes[..std::cmp::min(resp_bytes.len(), 4)]));
-            
-            let mut response_cursor = Cursor::new(resp_bytes.clone());
-            let odoh_response: ObliviousDoHMessage = match parse(&mut response_cursor) {
-                Ok(m) => m,
-                Err(e) => {
-                    native_log("ERROR", &format!("Failed to parse ODoH message: {:?}. Raw body (hex): {:02x?}", e, &resp_bytes[..std::cmp::min(resp_bytes.len(), 16)]));
-                    return Err(e.into());
-                }
-            };
-
-            let dns_resp_plaintext = decrypt_response(&query_plaintext, &odoh_response, client_secret)?;
-            let dns_resp = dns_resp_plaintext.into_msg().to_vec(); 
-            
-            let latency = start.elapsed().as_millis() as usize;
-            LAST_LATENCY.store(latency, Ordering::Relaxed);
-            add_query_log(domain.clone(), format!("OK ({}ms)", latency));
-
-            if data.len() > 2 && dns_resp.len() > 2 {
-                cache.insert(data.slice(2..), (Bytes::copy_from_slice(&dns_resp), cache_ttl)).await;
-            }
-            
-            send_response(udp_sock, tcp_stream, Bytes::from(dns_resp), peer).await
-        }
-        Err(e) => {
-             stats.errors.fetch_add(1, Ordering::Relaxed);
-             add_query_log(domain.clone(), "Error".to_string());
-             native_log("ERROR", &format!("HTTP request failed for {}: {:?}", domain, e));
-             Err(e.into())
-        }
+    if let Some(resp) = final_resp {
+        send_response(udp_sock, tcp_stream, Bytes::from(resp), peer).await
+    } else {
+        stats.errors.fetch_add(1, Ordering::Relaxed);
+        let err_str = if let Some(e) = last_err {
+            let msg = e.to_string();
+            if msg.contains("connection closed") { "Error (Conn Closed)".to_string() }
+            else if msg.contains("timed out") { "Error (Timeout)".to_string() }
+            else { format!("Error ({})", msg) }
+        } else {
+            "Error (Unknown)".to_string()
+        };
+        add_query_log(domain, err_str);
+        Err(anyhow::anyhow!("Request failed"))
     }
 }
 
@@ -665,6 +716,17 @@ async fn send_response(
 }
 
 fn extract_domain(data: &[u8]) -> String {
+    if let Ok(msg) = Message::from_vec(data) {
+        if let Some(query) = msg.queries().first() {
+            let name = query.name().to_string();
+            return if name.ends_with('.') && name.len() > 1 {
+                name[..name.len() - 1].to_string()
+            } else {
+                name
+            };
+        }
+    }
+
     if data.len() <= 12 { return "unknown".to_string(); }
     let mut d = String::new();
     let mut i = 12;
@@ -679,13 +741,13 @@ fn extract_domain(data: &[u8]) -> String {
     if d.is_empty() { "unknown".to_string() } else { d }
 }
 
-async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, dynamic_resolver: Option<&DynamicResolver>) -> Result<SocketAddr> {
+async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, dynamic_resolver: Option<&DynamicResolver>) -> Result<Vec<SocketAddr>> {
     if let Some(resolver) = dynamic_resolver {
         let hosts = resolver.hosts.read().await;
         if let Some(addrs) = hosts.get(domain) {
-            if let Some(addr) = addrs.first() {
-                native_log("INFO", &format!("Using cached/hardcoded bootstrap for {}: {}", domain, addr));
-                return Ok(*addr);
+            if !addrs.is_empty() {
+                native_log("INFO", &format!("Using cached/hardcoded bootstrap for {}: {:?}", domain, addrs));
+                return Ok(addrs.clone());
             }
         }
     }
@@ -744,21 +806,24 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, 
         }
     };
     
-    let ip = ips.iter().find(|ip| ip.is_ipv4()).or_else(|| ips.iter().find(|ip| ip.is_ipv6())).ok_or_else(|| anyhow::anyhow!("No IPs found for {}", domain))?;
+    let addrs: Vec<SocketAddr> = ips.iter().map(|ip| SocketAddr::new(ip, 443)).collect();
+    if addrs.is_empty() {
+        return Err(anyhow::anyhow!("No IPs found for {}", domain));
+    }
     
-    Ok(SocketAddr::new(ip, 443))
+    Ok(addrs)
 }
 
 fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Client> {
     let mut builder = Client::builder()
+        .user_agent("OxidOH/0.4.0")
         .dns_resolver(resolver)
         .use_rustls_tls() 
         .danger_accept_invalid_certs(true) // Required for some ODoH proxies/relays
-        .http2_prior_knowledge() 
-        .http3_prior_knowledge()
-        .pool_idle_timeout(Duration::from_secs(config.max_idle_time))
-        .pool_max_idle_per_host(32) 
-        .connect_timeout(Duration::from_secs(15));
+        .http2_adaptive_window(true)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(8) 
+        .connect_timeout(Duration::from_secs(10));
 
     // Some proxies like Hiddify might have certificate issues (CA used as End Entity)
     if config.odoh_proxy_url.is_some() {
@@ -844,10 +909,15 @@ pub mod jni_api {
         bootstrap_dns: JString,
         allow_ipv6: jni::sys::jboolean,
         cache_ttl: jni::sys::jlong,
+        tcp_limit: jint,
+        poll_interval: jni::sys::jlong,
+        use_http3: jni::sys::jboolean,
+        exclude_domain: JString,
     ) -> jint {
         let listen_addr: String = env.get_string(&listen_addr).unwrap().into();
         let resolver_url_input: String = env.get_string(&resolver_url).unwrap().into();
         let bootstrap_dns: String = env.get_string(&bootstrap_dns).unwrap().into();
+        let exclude_domain: String = env.get_string(&exclude_domain).unwrap().into();
         
         let urls = extract_urls(&resolver_url_input);
         if urls.is_empty() {
@@ -867,18 +937,19 @@ pub mod jni_api {
             odoh_proxy_url,
             bootstrap_dns,
             allow_ipv6: allow_ipv6 != 0,
-            tcp_client_limit: 20,
-            polling_interval: 120,
+            tcp_client_limit: tcp_limit as usize,
+            polling_interval: poll_interval as u64,
             force_ipv4: false,
             proxy_server: None,
             source_addr: None,
             http11: false,
-            http3: false,
+            http3: use_http3 != 0,
             max_idle_time: 120,
             conn_loss_time: 10,
             ca_path: None,
             statistic_interval: 0,
             cache_ttl: cache_ttl as u64,
+            exclude_domain: if exclude_domain.is_empty() { None } else { Some(exclude_domain) },
         };
 
         let token = CancellationToken::new();
@@ -958,5 +1029,64 @@ pub mod jni_api {
                 native_log("WARN", "DNS Cache clear failed: Cache not initialized");
             }
         });
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearLogs(
+        _env: JNIEnv,
+        _class: JClass,
+    ) {
+        let mut logs = QUERY_LOGS.lock().unwrap();
+        logs.clear();
+        native_log("INFO", "Query logs cleared successfully");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_domain_google() {
+        // Simple DNS query for google.com
+        let data = vec![
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x06, b'g', b'o', b'o', b'g', b'l', b'e', 
+            0x03, b'c', b'o', b'm', 0x00, 
+            0x00, 0x01, 0x00, 0x01
+        ];
+        let domain = extract_domain(&data);
+        assert_eq!(domain, "google.com");
+    }
+
+    #[test]
+    fn test_extract_domain_short() {
+        let data = vec![0x00; 12];
+        assert_eq!(extract_domain(&data), "unknown");
+    }
+
+    #[test]
+    fn test_stats_init() {
+        let stats = Stats::new();
+        assert_eq!(stats.queries_udp.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.queries_tcp.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.errors.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_extract_urls() {
+        let input = "https://example.com/dns-query https://proxy.com/target";
+        let urls = extract_urls(input);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://example.com/dns-query");
+        assert_eq!(urls[1], "https://proxy.com/target");
+    }
+    
+    #[test]
+    fn test_extract_urls_single() {
+        let input = "https://one.com/dns";
+        let urls = extract_urls(input);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0], "https://one.com/dns");
     }
 }

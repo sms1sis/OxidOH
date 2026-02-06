@@ -39,7 +39,7 @@ class ProxyTileService : TileService() {
         val isRunning = ProxyService.isProxyRunning
         
         tile.state = if (isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.label = "SafeDNS"
+        tile.label = getString(R.string.tile_label)
         
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
             tile.subtitle = if (isRunning) "Active" else "Inactive"

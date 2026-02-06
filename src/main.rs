@@ -62,6 +62,10 @@ struct Args {
     /// Cache TTL in seconds (default 60)
     #[arg(long, default_value_t = 60)]
     cache_ttl: u64,
+
+    /// Optional domain to exclude from cache
+    #[arg(short = 'e', long)]
+    exclude_domain: Option<String>,
 }
 
 #[tokio::main]
@@ -89,6 +93,7 @@ async fn main() -> Result<()> {
         ca_path: None,
         statistic_interval: args.statistic_interval,
         cache_ttl: args.cache_ttl,
+        exclude_domain: args.exclude_domain,
     };
 
     let stats = Arc::new(Stats::new());
