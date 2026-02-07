@@ -46,6 +46,8 @@ import io.github.sms1sis.oxidoh.ui.components.DrawerContent
 import io.github.sms1sis.oxidoh.ui.screens.DashboardScreen
 import io.github.sms1sis.oxidoh.ui.screens.DnsProfile
 import io.github.sms1sis.oxidoh.ui.screens.LogScreen
+import io.github.sms1sis.oxidoh.ui.screens.StatsScreen
+import io.github.sms1sis.oxidoh.ui.screens.AppSelectionScreen
 import io.github.sms1sis.oxidoh.ui.theme.OxidOHTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -127,6 +129,10 @@ class MainActivity : ComponentActivity() {
         var currentTab by remember { mutableStateOf(0) }
         var latency by remember { mutableStateOf(0) }
         var logs by remember { mutableStateOf(emptyArray<String>()) }
+        var stats by remember { mutableStateOf(intArrayOf(0, 0, 0)) }
+        var showAppSelection by remember { mutableStateOf(false) }
+        var excludedApps by remember { mutableStateOf(prefs.getStringSet("excluded_apps", emptySet()) ?: emptySet()) }
+        
         var autoStart by remember { mutableStateOf(prefs.getBoolean("auto_start", false)) }
         var allowIpv6 by remember { mutableStateOf(prefs.getBoolean("allow_ipv6", false)) }
         var cacheTtl by remember { mutableStateOf(prefs.getString("cache_ttl", "300") ?: "300") }
@@ -237,13 +243,14 @@ class MainActivity : ComponentActivity() {
                         latency = newLat
                     }
                     logs = ProxyService.getLogs()
+                    stats = ProxyService.getStats()
                 }
                 delay(1000)
             }
         }
 
         // Debounce effect for all settings
-        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort, allowIpv6, pendingCacheTtl, pendingTcpLimit, pendingPollInterval, useHttp3) {
+        LaunchedEffect(pendingHeartbeatDomain, pendingHeartbeatInterval, pendingResolverUrl, pendingBootstrapDns, pendingListenPort, allowIpv6, pendingCacheTtl, pendingTcpLimit, pendingPollInterval, useHttp3, excludedApps) {
             delay(1500) // Wait for 1.5s after user stops typing
             
             var changed = false
@@ -295,6 +302,20 @@ class MainActivity : ComponentActivity() {
 
         if (showAboutDialog) {
             AboutDialog(onDismiss = { showAboutDialog = false }, uriHandler = uriHandler)
+        }
+
+        if (showAppSelection) {
+            AppSelectionScreen(
+                excludedApps = excludedApps,
+                onBack = { showAppSelection = false },
+                onToggleApp = { pkg ->
+                    val newSet = excludedApps.toMutableSet()
+                    if (newSet.contains(pkg)) newSet.remove(pkg) else newSet.add(pkg)
+                    excludedApps = newSet
+                    prefs.edit().putStringSet("excluded_apps", newSet).apply()
+                }
+            )
+            return
         }
 
         val onToggle = {
@@ -362,6 +383,7 @@ class MainActivity : ComponentActivity() {
                         onHeartbeatIntervalChange = { pendingHeartbeatInterval = it },
                         isIgnoringBatteryOptimizations = isIgnoringBatteryOptimizations,
                         onRequestBatteryOptimization = { requestBatteryOptimization() },
+                        onAppExclusionClick = { showAppSelection = true },
                         onAboutClick = { showAboutDialog = true },
                         onClose = { scope.launch { drawerState.close() } }
                     )
@@ -433,7 +455,8 @@ class MainActivity : ComponentActivity() {
                         ) {
                             listOf(
                                 Icons.Filled.Dashboard to stringResource(R.string.tab_app),
-                                Icons.AutoMirrored.Filled.ListAlt to stringResource(R.string.tab_activity)
+                                Icons.AutoMirrored.Filled.ListAlt to stringResource(R.string.tab_activity),
+                                Icons.Filled.BarChart to stringResource(R.string.tab_stats)
                             ).forEachIndexed { index, pair ->
                                 val selected = currentTab == index
                                 val color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
@@ -470,8 +493,8 @@ class MainActivity : ComponentActivity() {
                         ))
                     }
 
-                    if (currentTab == 0) {
-                        DashboardScreen(
+                    when (currentTab) {
+                        0 -> DashboardScreen(
                             isRunning = isRunning,
                             latency = latency,
                             resolverUrl = pendingResolverUrl,
@@ -492,8 +515,8 @@ class MainActivity : ComponentActivity() {
                             onPortChange = { pendingListenPort = it },
                             onToggle = onToggle
                         )
-                    } else {
-                        LogScreen(logs)
+                        1 -> LogScreen(logs)
+                        2 -> StatsScreen(stats)
                     }
                 }
             }

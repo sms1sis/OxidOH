@@ -111,6 +111,9 @@ fn native_log(level: &str, msg: &str) {
 }
 
 #[cfg(feature = "jni")]
+static GLOBAL_STATS: LazyLock<RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| RwLock::new(None));
+
+#[cfg(feature = "jni")]
 static GLOBAL_CACHE: LazyLock<RwLock<Option<DnsCache>>> = LazyLock::new(|| RwLock::new(None));
 
 static LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
@@ -1025,6 +1028,10 @@ pub mod jni_api {
         }
         
         let stats = Arc::new(Stats::new());
+        RUNTIME.block_on(async {
+            let mut w = GLOBAL_STATS.write().await;
+            *w = Some(stats.clone());
+        });
 
         let _handle = RUNTIME.spawn(async move {
             native_log("INFO", "Proxy task started inside runtime");
@@ -1067,6 +1074,42 @@ pub mod jni_api {
              env.set_object_array_element(&array, i as jni::sys::jsize, &s).unwrap();
          }
          array.into_raw()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getStats(
+        env: JNIEnv,
+        _class: JClass,
+    ) -> jni::sys::jintArray {
+        let stats_opt = RUNTIME.block_on(async {
+            GLOBAL_STATS.read().await.clone()
+        });
+
+        let mut values = [0i32; 3];
+        if let Some(stats) = stats_opt {
+            values[0] = stats.queries_udp.load(Ordering::Relaxed) as i32;
+            values[1] = stats.queries_tcp.load(Ordering::Relaxed) as i32;
+            values[2] = stats.errors.load(Ordering::Relaxed) as i32;
+        }
+
+        let array = env.new_int_array(3).unwrap();
+        env.set_int_array_region(&array, 0, &values).unwrap();
+        array.into_raw()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearStats(
+        _env: JNIEnv,
+        _class: JClass,
+    ) {
+        if let Some(stats) = RUNTIME.block_on(async {
+            GLOBAL_STATS.read().await.clone()
+        }) {
+            stats.queries_udp.store(0, Ordering::Relaxed);
+            stats.queries_tcp.store(0, Ordering::Relaxed);
+            stats.errors.store(0, Ordering::Relaxed);
+            native_log("INFO", "Traffic statistics cleared");
+        }
     }
 
     #[unsafe(no_mangle)]

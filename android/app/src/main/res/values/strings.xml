@@ -71,17 +71,30 @@
     <string name="update_check_failed">Failed to check for updates</string>
     
         <!-- Tab Names -->
-    
-        <string name="tab_app">App</string>
-    
-        <string name="tab_activity">Activity</string>
-    
-        
-    
-        <!-- Quick Settings -->
-    
-        <string name="tile_label">OxidOH</string>
-    
-    </resources>
+    <string name="tab_app">App</string>
+    <string name="tab_activity">Activity</string>
+    <string name="tab_stats">Stats</string>
+
+    <!-- Stats Screen -->
+    <string name="traffic_statistics">Traffic Statistics</string>
+    <string name="udp_queries">UDP Queries</string>
+    <string name="tcp_queries">TCP Queries</string>
+    <string name="total_queries">Total Queries</string>
+    <string name="errors_count">Errors</string>
+    <string name="success_rate">Success Rate</string>
+    <string name="real_time_monitor">Real-time Traffic Monitor</string>
+    <string name="clear_statistics">Clear Statistics</string>
+    <string name="stats_cleared">Statistics Reset</string>
+
+    <!-- App Selection -->
+    <string name="app_exclusion">App Exclusion</string>
+    <string name="app_exclusion_desc">Select apps to bypass OxidOH</string>
+    <string name="search_apps">Search apps...</string>
+    <string name="no_apps_found">No apps found</string>
+    <string name="excluded_apps_count">%1$d apps excluded</string>
+
+    <!-- Quick Settings -->
+    <string name="tile_label">OxidOH</string>
+</resources>
     
     

@@ -5,6 +5,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Info
@@ -46,6 +47,7 @@ fun DrawerContent(
     onHeartbeatIntervalChange: (String) -> Unit,
     isIgnoringBatteryOptimizations: Boolean,
     onRequestBatteryOptimization: () -> Unit,
+    onAppExclusionClick: () -> Unit,
     onAboutClick: () -> Unit,
     onClose: () -> Unit
 ) {
@@ -83,6 +85,28 @@ fun DrawerContent(
         HorizontalDivider(modifier = Modifier.padding(vertical = 24.dp))
         
         Text(stringResource(R.string.service), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(16.dp))
+
+        Surface(
+            onClick = { onAppExclusionClick(); onClose() },
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.1f),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Apps, null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(16.dp))
+                Column {
+                    Text(stringResource(R.string.app_exclusion), fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.app_exclusion_desc), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
         Spacer(Modifier.height(16.dp))
 
         if (!isIgnoringBatteryOptimizations) {
