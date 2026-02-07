@@ -438,10 +438,17 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                      let exclude_domain = exclude_domain.clone();
                      tokio::spawn(async move {
                          stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
-                         if extract_domain(&data) == "unknown" {
-                             stats.malformed.fetch_add(1, Ordering::Relaxed);
+                         let mut len_buf = [0u8; 2];
+                         if stream.read_exact(&mut len_buf).await.is_ok() {
+                             let len = u16::from_be_bytes(len_buf) as usize;
+                             let mut data = vec![0u8; len];
+                             if stream.read_exact(&mut data).await.is_ok() {
+                                 if extract_domain(&data) == "unknown" {
+                                     stats.malformed.fetch_add(1, Ordering::Relaxed);
+                                 }
+                                 let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl, exclude_domain).await;
+                             }
                          }
-                         let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl, exclude_domain).await;
                      });
                 }
             }
