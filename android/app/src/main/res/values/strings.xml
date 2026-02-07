@@ -77,12 +77,18 @@
 
     <!-- Stats Screen -->
     <string name="traffic_statistics">Traffic Statistics</string>
+    <string name="real_time_monitor">Real-time Traffic Monitor</string>
+    <string name="local_traffic">Local Traffic (Inbound)</string>
+    <string name="remote_traffic">Remote Traffic (Outbound)</string>
     <string name="udp_queries">UDP Queries</string>
     <string name="tcp_queries">TCP Queries</string>
+    <string name="malformed_queries">Malformed</string>
+    <string name="https_queries">HTTPS Requests</string>
+    <string name="cache_hits">Cache Hits</string>
+    <string name="avg_latency">Avg Latency</string>
     <string name="total_queries">Total Queries</string>
     <string name="errors_count">Errors</string>
     <string name="success_rate">Success Rate</string>
-    <string name="real_time_monitor">Real-time Traffic Monitor</string>
     <string name="clear_statistics">Clear Statistics</string>
     <string name="stats_cleared">Statistics Reset</string>
 

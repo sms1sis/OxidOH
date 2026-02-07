@@ -25,10 +25,19 @@ import io.github.sms1sis.oxidoh.R
 @Composable
 fun StatsScreen(stats: IntArray) {
     val context = LocalContext.current
+    
+    // Inbound
     val udp = stats.getOrElse(0) { 0 }
     val tcp = stats.getOrElse(1) { 0 }
-    val errors = stats.getOrElse(2) { 0 }
-    val total = udp + tcp
+    val malformed = stats.getOrElse(2) { 0 }
+    val total = stats.getOrElse(3) { 0 }
+    
+    // Outbound
+    val https = stats.getOrElse(4) { 0 }
+    val cacheHits = stats.getOrElse(5) { 0 }
+    val errors = stats.getOrElse(6) { 0 }
+    val avgLat = stats.getOrElse(7) { 0 }
+
     val successRate = if (total > 0) {
         ((total - errors).toFloat() / total.toFloat() * 100).toInt().coerceIn(0, 100)
     } else null
@@ -112,7 +121,14 @@ fun StatsScreen(stats: IntArray) {
 
         Spacer(Modifier.height(24.dp))
 
-        // Grid of Stats
+        // --- Local Traffic Section (2x2) ---
+        Text(
+            stringResource(R.string.local_traffic),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.height(16.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             StatCard(
                 modifier = Modifier.weight(1f),
@@ -127,9 +143,7 @@ fun StatsScreen(stats: IntArray) {
                 value = tcp.toString()
             )
         }
-
         Spacer(Modifier.height(16.dp))
-
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             StatCard(
                 modifier = Modifier.weight(1f),
@@ -139,12 +153,54 @@ fun StatsScreen(stats: IntArray) {
             )
             StatCard(
                 modifier = Modifier.weight(1f),
+                icon = Icons.Default.Warning,
+                label = stringResource(R.string.malformed_queries),
+                value = malformed.toString()
+            )
+        }
+
+        Spacer(Modifier.height(32.dp))
+
+        // --- Remote Traffic Section (2x2) ---
+        Text(
+            stringResource(R.string.remote_traffic),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(Modifier.height(16.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.Security,
+                label = stringResource(R.string.https_queries),
+                value = https.toString()
+            )
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.OfflineBolt,
+                label = stringResource(R.string.cache_hits),
+                value = cacheHits.toString()
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            StatCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Default.History,
+                label = stringResource(R.string.avg_latency),
+                value = if (avgLat > 0) "${avgLat}ms" else "--"
+            )
+            StatCard(
+                modifier = Modifier.weight(1f),
                 icon = Icons.Default.ErrorOutline,
                 label = stringResource(R.string.errors_count),
                 value = errors.toString(),
                 isError = errors > 0
             )
         }
+        
+        Spacer(Modifier.height(32.dp))
     }
 }
 

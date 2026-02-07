@@ -25,7 +25,12 @@ use hickory_resolver::proto::op::Message;
 pub struct Stats {
     pub queries_udp: AtomicUsize,
     pub queries_tcp: AtomicUsize,
+    pub queries_https: AtomicUsize,
+    pub cache_hits: AtomicUsize,
+    pub malformed: AtomicUsize,
     pub errors: AtomicUsize,
+    pub total_latency: AtomicUsize,
+    pub latency_count: AtomicUsize,
 }
 
 struct LogMessage {
@@ -130,7 +135,12 @@ impl Stats {
         Self {
             queries_udp: AtomicUsize::new(0),
             queries_tcp: AtomicUsize::new(0),
+            queries_https: AtomicUsize::new(0),
+            cache_hits: AtomicUsize::new(0),
+            malformed: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),
+            total_latency: AtomicUsize::new(0),
+            latency_count: AtomicUsize::new(0),
         }
     }
 }
@@ -392,6 +402,9 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let exclude_domain = exclude_domain.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
+                            if extract_domain(&data) == "unknown" {
+                                stats.malformed.fetch_add(1, Ordering::Relaxed);
+                            }
                             native_log("DEBUG", &format!("Handling UDP query from {}", peer));
                             if let Err(e) = handle_query(Some(socket), None, client, resolver_url, target_url, proxy_url, data, peer, stats, cache, cache_ttl, exclude_domain).await {
                                 native_log("ERROR", &format!("UDP error: {}", e));
@@ -425,14 +438,10 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                      let exclude_domain = exclude_domain.clone();
                      tokio::spawn(async move {
                          stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
-                         let mut len_buf = [0u8; 2];
-                         if stream.read_exact(&mut len_buf).await.is_ok() {
-                             let len = u16::from_be_bytes(len_buf) as usize;
-                             let mut data = vec![0u8; len];
-                             if stream.read_exact(&mut data).await.is_ok() {
-                                 let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl, exclude_domain).await;
-                             }
+                         if extract_domain(&data) == "unknown" {
+                             stats.malformed.fetch_add(1, Ordering::Relaxed);
                          }
+                         let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl, exclude_domain).await;
                      });
                 }
             }
@@ -575,6 +584,7 @@ async fn handle_query(
                 resp[0] = original_id[0];
                 resp[1] = original_id[1];
                 
+                stats.cache_hits.fetch_add(1, Ordering::Relaxed);
                 add_query_log(domain, format!("OK (Cache, TTL {})", remaining));
                 return send_response(udp_sock, tcp_stream, Bytes::from(resp), peer).await;
             } else {
@@ -582,6 +592,8 @@ async fn handle_query(
             }
         }
     }
+
+    stats.queries_https.fetch_add(1, Ordering::Relaxed);
 
     let start = std::time::Instant::now();
     let mut last_err = None;
@@ -718,6 +730,8 @@ async fn handle_query(
                 
                 let latency = start.elapsed().as_millis() as usize;
                 LAST_LATENCY.store(latency, Ordering::Relaxed);
+                stats.total_latency.fetch_add(latency, Ordering::Relaxed);
+                stats.latency_count.fetch_add(1, Ordering::Relaxed);
                 add_query_log(domain.clone(), format!("OK ({}ms, att {})", latency, attempt));
 
                 if should_cache && data.len() > 2 && dns_resp.len() > 2 {
@@ -1085,14 +1099,23 @@ pub mod jni_api {
             GLOBAL_STATS.read().await.clone()
         });
 
-        let mut values = [0i32; 3];
+        let mut values = [0i32; 8];
         if let Some(stats) = stats_opt {
             values[0] = stats.queries_udp.load(Ordering::Relaxed) as i32;
             values[1] = stats.queries_tcp.load(Ordering::Relaxed) as i32;
-            values[2] = stats.errors.load(Ordering::Relaxed) as i32;
+            values[2] = stats.malformed.load(Ordering::Relaxed) as i32;
+            values[3] = (stats.queries_udp.load(Ordering::Relaxed) + stats.queries_tcp.load(Ordering::Relaxed)) as i32;
+            
+            values[4] = stats.queries_https.load(Ordering::Relaxed) as i32;
+            values[5] = stats.cache_hits.load(Ordering::Relaxed) as i32;
+            values[6] = stats.errors.load(Ordering::Relaxed) as i32;
+            
+            let t_lat = stats.total_latency.load(Ordering::Relaxed);
+            let count = stats.latency_count.load(Ordering::Relaxed);
+            values[7] = if count > 0 { (t_lat / count) as i32 } else { 0 };
         }
 
-        let array = env.new_int_array(3).unwrap();
+        let array = env.new_int_array(8).unwrap();
         env.set_int_array_region(&array, 0, &values).unwrap();
         array.into_raw()
     }
@@ -1107,7 +1130,12 @@ pub mod jni_api {
         }) {
             stats.queries_udp.store(0, Ordering::Relaxed);
             stats.queries_tcp.store(0, Ordering::Relaxed);
+            stats.queries_https.store(0, Ordering::Relaxed);
+            stats.cache_hits.store(0, Ordering::Relaxed);
+            stats.malformed.store(0, Ordering::Relaxed);
             stats.errors.store(0, Ordering::Relaxed);
+            stats.total_latency.store(0, Ordering::Relaxed);
+            stats.latency_count.store(0, Ordering::Relaxed);
             native_log("INFO", "Traffic statistics cleared");
         }
     }
