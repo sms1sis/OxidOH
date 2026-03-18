@@ -11,6 +11,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import io.github.sms1sis.oxidoh.BuildConfig
 import io.github.sms1sis.oxidoh.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -27,7 +28,7 @@ fun AboutDialog(onDismiss: () -> Unit, uriHandler: androidx.compose.ui.platform.
         title = { Text(stringResource(R.string.about_title)) },
         text = {
             Column {
-                Text(stringResource(R.string.version_info), fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.version_info, BuildConfig.VERSION_NAME), fontWeight = FontWeight.Bold)
                 Text(stringResource(R.string.developer_info))
                 Spacer(Modifier.height(16.dp))
                 
@@ -66,7 +67,7 @@ fun AboutDialog(onDismiss: () -> Unit, uriHandler: androidx.compose.ui.platform.
 
 private suspend fun checkForUpdates(context: android.content.Context, uriHandler: androidx.compose.ui.platform.UriHandler) {
     val repoUrl = "https://api.github.com/repos/sms1sis/OxidOH/releases/latest"
-    val currentVersion = "v0.2.1"
+    val currentVersion = "v${BuildConfig.VERSION_NAME}"
 
     withContext(Dispatchers.IO) {
         try {
