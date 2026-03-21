@@ -13,12 +13,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::{VecDeque, HashMap};
 use std::sync::LazyLock;
 use bytes::Bytes;
-use moka::future::Cache;
 use odoh_rs::{ObliviousDoHConfig, ObliviousDoHConfigs, ObliviousDoHMessage, ObliviousDoHMessagePlaintext, ObliviousDoHConfigContents, encrypt_query, decrypt_response, parse, compose};
-use rand::rngs::StdRng;
-use rand::SeedableRng;
 use std::io::Cursor;
+#[cfg(feature = "jni")]
 use jni::JavaVM;
+#[cfg(feature = "jni")]
 use jni::objects::JClass;
 use hickory_resolver::proto::op::Message;
 
@@ -27,6 +26,7 @@ pub struct Stats {
     pub queries_tcp: AtomicUsize,
     pub queries_https: AtomicUsize,
     pub cache_hits: AtomicUsize,
+    pub cache_misses: AtomicUsize,
     pub malformed: AtomicUsize,
     pub errors: AtomicUsize,
     pub total_latency: AtomicUsize,
@@ -41,61 +41,68 @@ struct LogMessage {
 static QUERY_LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(50)));
 static LOG_SENDER: LazyLock<mpsc::UnboundedSender<LogMessage>> = LazyLock::new(|| {
     let (tx, mut rx) = mpsc::unbounded_channel::<LogMessage>();
-    tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let mut logs = QUERY_LOGS.lock().unwrap();
-            if logs.len() >= 50 {
-                logs.pop_front();
+    // Use a plain OS thread (mirroring NATIVE_LOG_SENDER) so this is safe to
+    // initialise before the Tokio runtime exists, e.g. during static init or
+    // early in main() before #[tokio::main] sets up the executor.
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("log worker runtime");
+        rt.block_on(async move {
+            while let Some(msg) = rx.recv().await {
+                let mut logs = QUERY_LOGS.lock().unwrap();
+                if logs.len() >= 50 {
+                    logs.pop_front();
+                }
+                let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
+                logs.push_back(format!("[{}] {} -> {}", timestamp, msg.domain, msg.status));
             }
-            let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-            logs.push_back(format!("[{}] {} -> {}", timestamp, msg.domain, msg.status));
-        }
+        });
     });
     tx
 });
 
-struct NativeLog {
-    level: String,
-    msg: String,
+enum NativeLog {
+    Message { level: String, msg: String },
+    Shutdown,
 }
 
 static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock::new(|| {
     let (tx, mut rx) = mpsc::unbounded_channel::<NativeLog>();
-    
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            while let Some(log) = rx.recv().await {
-                // Fallback to standard android logcat
-                match log.level.as_str() {
-                    "ERROR" => log::error!(target: "OxidOH-Native", "{}", log.msg),
-                    "WARN" => log::warn!(target: "OxidOH-Native", "{}", log.msg),
-                    "INFO" => log::info!(target: "OxidOH-Native", "{}", log.msg),
-                    _ => log::debug!(target: "OxidOH-Native", "{}", log.msg),
+            while let Some(entry) = rx.recv().await {
+                let (level, msg) = match entry {
+                    NativeLog::Shutdown => break,
+                    NativeLog::Message { level, msg } => (level, msg),
+                };
+                // Log to Android logcat as fallback
+                match level.as_str() {
+                    "ERROR" => log::error!(target: "OxidOH-Native", "{}", msg),
+                    "WARN"  => log::warn!(target: "OxidOH-Native", "{}", msg),
+                    "INFO"  => log::info!(target: "OxidOH-Native", "{}", msg),
+                    _       => log::debug!(target: "OxidOH-Native", "{}", msg),
                 }
-
-                if let Ok(jvm_lock) = JVM.read() {
-                    if let Some(jvm) = jvm_lock.as_ref() {
-                        if let Ok(class_lock) = PROXY_SERVICE_CLASS.read() {
-                            if let Some(class_ref) = class_lock.as_ref() {
-                                if let Ok(mut env) = jvm.attach_current_thread() {
-                                    if let Ok(level_j) = env.new_string(&log.level) {
-                                        if let Ok(tag_j) = env.new_string("OxidOH-Native") {
-                                            if let Ok(msg_j) = env.new_string(&log.msg) {
-                                                let _ = env.call_static_method(
-                                                    class_ref,
-                                                    "nativeLog",
-                                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                                                    &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // Forward to Kotlin via JNI — flat closure avoids nested if-let pyramid
+                let _ = (|| -> Option<()> {
+                    let jvm_guard   = JVM.read().ok()?;
+                    let jvm   = jvm_guard.as_ref()?;
+                    let class_guard = PROXY_SERVICE_CLASS.read().ok()?;
+                    let class: &jni::objects::GlobalRef = class_guard.as_ref()?;
+                    let mut env = jvm.attach_current_thread().ok()?;
+                    let level_j = env.new_string(&level).ok()?;
+                    let tag_j   = env.new_string("OxidOH-Native").ok()?;
+                    let msg_j   = env.new_string(&msg).ok()?;
+                    env.call_static_method(
+                        class,
+                        "nativeLog",
+                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                        &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
+                    ).ok()?;
+                    Some(())
+                })();
             }
         });
     });
@@ -105,23 +112,29 @@ static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock:
 fn native_log(level: &str, msg: &str) {
     if !cfg!(debug_assertions) {
         match level {
-            "ERROR" | "WARN" => {} // Allow these
-            _ => return, // Silence everything else (INFO, DEBUG)
+            "ERROR" | "WARN" | "INFO" => {} // Always allow
+            _ => return,                     // Suppress DEBUG/TRACE in release
         }
     }
-    let _ = NATIVE_LOG_SENDER.send(NativeLog {
+    let _ = NATIVE_LOG_SENDER.send(NativeLog::Message {
         level: level.to_string(),
         msg: msg.to_string(),
     });
 }
 
 #[cfg(feature = "jni")]
-static GLOBAL_STATS: LazyLock<RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| RwLock::new(None));
+static GLOBAL_STATS: LazyLock<std::sync::RwLock<Option<Arc<Stats>>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 #[cfg(feature = "jni")]
-static GLOBAL_CACHE: LazyLock<RwLock<Option<DnsCache>>> = LazyLock::new(|| RwLock::new(None));
+static GLOBAL_CACHE: LazyLock<std::sync::RwLock<Option<DnsCache>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 static LAST_LATENCY: AtomicUsize = AtomicUsize::new(0);
+
+// In-flight deduplication: maps question-bytes → list of oneshot senders waiting
+// for the result.  The first query for a given domain fires the ODoH fetch;
+// concurrent duplicates just subscribe and share the response.
+type InflightMap = Mutex<HashMap<Bytes, Vec<tokio::sync::oneshot::Sender<Result<Bytes, String>>>>>; // Bytes shared via clone (cheap arc-clone)
+static INFLIGHT: LazyLock<InflightMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn add_query_log(domain: String, status: String) {
     if !cfg!(debug_assertions) && status.contains("DEBUG") {
@@ -137,11 +150,18 @@ impl Stats {
             queries_tcp: AtomicUsize::new(0),
             queries_https: AtomicUsize::new(0),
             cache_hits: AtomicUsize::new(0),
+            cache_misses: AtomicUsize::new(0),
             malformed: AtomicUsize::new(0),
             errors: AtomicUsize::new(0),
             total_latency: AtomicUsize::new(0),
             latency_count: AtomicUsize::new(0),
         }
+    }
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -165,14 +185,73 @@ pub struct Config {
     pub ca_path: Option<String>,
     pub statistic_interval: u64,
     pub cache_ttl: u64,
-    pub exclude_domain: Option<String>,
+    pub exclude_suffixes: Option<String>, // comma-separated domain suffixes to exclude from cache
 }
 
-type DnsCache = Cache<Bytes, (Bytes, Instant)>;
+// ── Sharded DNS Cache ─────────────────────────────────────────────────────────
+// 16-shard HashMap replaces moka to eliminate background GC threads and the
+// lock contention issues they cause on Android.  Each shard holds entries as
+// (response_bytes, expiry_instant) keyed by the DNS question section (ID-stripped).
+const CACHE_SHARDS: usize = 16;
+
+#[derive(Clone)]
+struct DnsCache {
+    shards: Arc<[Mutex<HashMap<Bytes, (Arc<Bytes>, Instant)>>; CACHE_SHARDS]>,
+}
+
+impl DnsCache {
+    fn new() -> Self {
+        Self {
+            shards: Arc::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
+        }
+    }
+
+    fn shard_index(key: &Bytes) -> usize {
+        // FNV-1a over the first 4 bytes (qtype+qname start) for fast dispatch
+        let mut h: u32 = 2166136261;
+        for &b in key.iter().take(8) {
+            h ^= b as u32;
+            h = h.wrapping_mul(16777619);
+        }
+        (h as usize) & (CACHE_SHARDS - 1)
+    }
+
+    fn get(&self, key: &Bytes) -> Option<(Arc<Bytes>, Instant)> {
+        let idx = Self::shard_index(key);
+        let shard = self.shards[idx].lock().unwrap();
+        shard.get(key).map(|(b, t)| (Arc::clone(b), *t))
+    }
+
+    fn insert(&self, key: Bytes, value: (Bytes, Instant)) {
+        let idx = Self::shard_index(&key);
+        let mut shard = self.shards[idx].lock().unwrap();
+        // Opportunistic eviction: remove expired entries in this shard
+        let now = Instant::now();
+        shard.retain(|_, (_, exp)| *exp > now);
+        shard.insert(key, (Arc::new(value.0), value.1));
+    }
+
+    fn invalidate(&self, key: &Bytes) {
+        let idx = Self::shard_index(key);
+        let mut shard = self.shards[idx].lock().unwrap();
+        shard.remove(key);
+    }
+
+    fn invalidate_all(&self) {
+        for shard in self.shards.iter() {
+            shard.lock().unwrap().clear();
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.shards.iter().map(|s| s.lock().unwrap().len()).sum()
+    }
+}
 
 #[derive(Clone)]
 struct DynamicResolver {
-    hosts: Arc<RwLock<HashMap<String, Vec<SocketAddr>>>>,
+    // Arc<Vec<>> so resolve() shares the address list without cloning it
+    hosts: Arc<RwLock<HashMap<String, Arc<Vec<SocketAddr>>>>>,
 }
 
 impl DynamicResolver {
@@ -184,7 +263,7 @@ impl DynamicResolver {
 
     async fn update(&self, domain: String, addrs: Vec<SocketAddr>) {
         let mut hosts = self.hosts.write().await;
-        hosts.insert(domain, addrs);
+        hosts.insert(domain, Arc::new(addrs));
     }
 }
 
@@ -196,22 +275,29 @@ impl Resolve for DynamicResolver {
         Box::pin(async move {
             let hosts = hosts.read().await;
             if let Some(addrs) = hosts.get(&name_str) {
-                native_log("DEBUG", &format!("DynamicResolver: resolved {} to {:?}", name_str, addrs));
-                Ok(Box::new(addrs.clone().into_iter()) as Addrs)
+                // Collect into Vec before dropping the lock so the iterator
+                // doesn't borrow from addrs which would outlive the guard.
+                let addrs_vec: Vec<SocketAddr> = addrs.iter().copied().collect();
+                drop(hosts);
+                Ok(Box::new(addrs_vec.into_iter()) as Addrs)
             } else {
-                native_log("WARN", &format!("DynamicResolver: resolution failed for {}", name_str));
-                Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Host not found")) as Box<dyn std::error::Error + Send + Sync>)
+                Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound,
+                    format!("Host not found: {}", name_str)))
+                    as Box<dyn std::error::Error + Send + Sync>)
             }
         })
     }
 }
 
 static ODOH_CONFIG: LazyLock<std::sync::RwLock<Option<ObliviousDoHConfig>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+#[cfg(feature = "jni")]
 static JVM: LazyLock<std::sync::RwLock<Option<JavaVM>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+#[cfg(feature = "jni")]
 static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::GlobalRef>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<()> {
-    let addr: SocketAddr = format!("{}:{}", "0.0.0.0", config.listen_port)
+    native_log("INFO", &format!("run_proxy entered, binding {}:{}", config.listen_addr, config.listen_port));
+    let addr: SocketAddr = format!("{}:{}", config.listen_addr, config.listen_port)
         .parse()
         .context("Failed to parse listen address")?;
 
@@ -219,38 +305,33 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         .context("Failed to parse target URL")?;
     let target_domain = target_url_parsed.domain().context("Target URL must have a domain")?.to_string();
 
+    // Bind using std::net directly — socket2's SO_REUSEPORT setsockopt call
+    // hangs indefinitely on Android under certain SELinux policies (untrusted_app
+    // is denied cgroup access and the kernel blocks in the syscall path).
+    // std::net bind uses only the minimum required socket options and is always
+    // permitted for untrusted_app.
     let mut udp_socket = None;
     let mut tcp_listener = None;
     for i in 0..5 {
-        use socket2::{Socket, Domain, Type, Protocol};
-        
-        let bind_res = (|| -> Result<(UdpSocket, TcpListener)> {
-            let udp_sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-            udp_sock.set_reuse_address(true)?;
-            #[cfg(not(windows))]
-            udp_sock.set_reuse_port(true)?;
-            udp_sock.bind(&addr.into())?;
-            let udp_std: std::net::UdpSocket = udp_sock.into();
-            
-            let tcp_sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-            tcp_sock.set_reuse_address(true)?;
-            #[cfg(not(windows))]
-            tcp_sock.set_reuse_port(true)?;
-            tcp_sock.bind(&addr.into())?;
-            tcp_sock.listen(128)?;
-            let tcp_std: std::net::TcpListener = tcp_sock.into();
+        let bind_res = tokio::task::spawn_blocking({
+            let addr = addr;
+            move || -> Result<(std::net::UdpSocket, std::net::TcpListener)> {
+                let udp = std::net::UdpSocket::bind(addr)?;
+                udp.set_nonblocking(true)?;
+                let tcp = std::net::TcpListener::bind(addr)?;
+                tcp.set_nonblocking(true)?;
+                Ok((udp, tcp))
+            }
+        }).await.context("spawn_blocking panicked")??;
 
-            Ok((UdpSocket::from_std(udp_std)?, TcpListener::from_std(tcp_std)?))
-        })();
-
-        match bind_res {
-            Ok((s, l)) => {
-                udp_socket = Some(Arc::new(s));
-                tcp_listener = Some(l);
+        match (UdpSocket::from_std(bind_res.0), TcpListener::from_std(bind_res.1)) {
+            (Ok(u), Ok(t)) => {
+                udp_socket = Some(Arc::new(u));
+                tcp_listener = Some(t);
                 break;
             }
-            Err(e) => { 
-                native_log("WARN", &format!("Failed to bind (attempt {}): {}", i, e));
+            (Err(e), _) | (_, Err(e)) => {
+                native_log("WARN", &format!("Failed to convert socket (attempt {}): {}", i, e));
             }
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -321,12 +402,14 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         }
     }
 
-    // Background task to refresh ODoH config periodically (every 1 hour)
+    // Background task to refresh ODoH config periodically (every 1 hour).
+    // Use interval_at so the first tick fires after 1 hour, not immediately.
     let config_refresh_handle = {
         let client = client.clone();
         let target_url = config.odoh_target_url.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(3600));
+            let start = tokio::time::Instant::now() + Duration::from_secs(3600);
+            let mut interval = tokio::time::interval_at(start, Duration::from_secs(3600));
             loop {
                 interval.tick().await;
                 native_log("INFO", "Periodically refreshing ODoH config...");
@@ -362,12 +445,13 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     
     let send_url_str = Arc::new(send_url);
     
-    let cache: DnsCache = Cache::builder().max_capacity(2048).build();
+    let cache: DnsCache = DnsCache::new();
 
     #[cfg(feature = "jni")]
     {
-        let mut w = GLOBAL_CACHE.write().await;
-        *w = Some(cache.clone());
+        if let Ok(mut w) = GLOBAL_CACHE.write() {
+            *w = Some(cache.clone());
+        }
     }
 
     native_log("INFO", "Starting proxy loops");
@@ -375,7 +459,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
     let target_url_str = Arc::new(config.odoh_target_url.clone());
     let proxy_url_str = config.odoh_proxy_url.as_ref().map(|s| Arc::new(s.clone()));
     let cache_ttl = config.cache_ttl;
-    let exclude_domain = config.exclude_domain.clone();
+    let exclude_suffixes = config.exclude_suffixes.clone();
 
     let mut udp_loop = {
         let socket = udp_socket.clone();
@@ -385,7 +469,7 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
         let proxy_url = proxy_url_str.clone();
         let stats = stats.clone();
         let cache = cache.clone();
-        let exclude_domain = exclude_domain.clone();
+        let exclude_suffixes = exclude_suffixes.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
             loop {
@@ -399,19 +483,24 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
                         let proxy_url = proxy_url.clone();
                         let stats = stats.clone();
                         let cache = cache.clone();
-                        let exclude_domain = exclude_domain.clone();
+                        let exclude_suffixes = exclude_suffixes.clone();
                         tokio::spawn(async move {
                             stats.queries_udp.fetch_add(1, Ordering::Relaxed);
-                            if extract_domain(&data) == "unknown" {
-                                stats.malformed.fetch_add(1, Ordering::Relaxed);
-                            }
-                            native_log("DEBUG", &format!("Handling UDP query from {}", peer));
-                            if let Err(e) = handle_query(Some(socket), None, client, resolver_url, target_url, proxy_url, data, peer, stats, cache, cache_ttl, exclude_domain).await {
+                            #[cfg(debug_assertions)] native_log("DEBUG", &format!("Handling UDP query from {}", peer));
+                            if let Err(e) = handle_query(Some(socket), None, client, resolver_url, target_url, proxy_url, data, peer, stats, cache, cache_ttl, exclude_suffixes).await {
                                 native_log("ERROR", &format!("UDP error: {}", e));
                             }
                         });
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        native_log("ERROR", &format!("UDP recv_from error: {}", e));
+                        // Only break on unrecoverable errors; transient errors (EAGAIN) are retried.
+                        if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::Interrupted {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            continue;
+                        }
+                        break;
+                    }
                 }
             }
         })
@@ -425,31 +514,43 @@ pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio
          let proxy_url = proxy_url_str.clone();
          let stats = stats.clone();
          let cache = cache.clone();
-         let exclude_domain = exclude_domain.clone();
+         let exclude_suffixes = exclude_suffixes.clone();
          tokio::spawn(async move {
             loop {
-                if let Ok((mut stream, peer)) = listener.accept().await {
-                     let client = client.clone();
-                     let resolver_url = resolver_url.clone();
-                     let target_url = target_url.clone();
-                     let proxy_url = proxy_url.clone();
-                     let stats = stats.clone();
-                     let cache = cache.clone();
-                     let exclude_domain = exclude_domain.clone();
-                     tokio::spawn(async move {
-                         stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
-                         let mut len_buf = [0u8; 2];
-                         if stream.read_exact(&mut len_buf).await.is_ok() {
-                             let len = u16::from_be_bytes(len_buf) as usize;
-                             let mut data = vec![0u8; len];
-                             if stream.read_exact(&mut data).await.is_ok() {
-                                 if extract_domain(&data) == "unknown" {
-                                     stats.malformed.fetch_add(1, Ordering::Relaxed);
-                                 }
-                                 let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl, exclude_domain).await;
-                             }
-                         }
-                     });
+                match listener.accept().await {
+                    Ok((mut stream, peer)) => {
+                        let client = client.clone();
+                        let resolver_url = resolver_url.clone();
+                        let target_url = target_url.clone();
+                        let proxy_url = proxy_url.clone();
+                        let stats = stats.clone();
+                        let cache = cache.clone();
+                        let exclude_suffixes = exclude_suffixes.clone();
+                        tokio::spawn(async move {
+                            stats.queries_tcp.fetch_add(1, Ordering::Relaxed);
+                            let mut len_buf = [0u8; 2];
+                            if stream.read_exact(&mut len_buf).await.is_ok() {
+                                let len = u16::from_be_bytes(len_buf) as usize;
+                                // Guard against zero-length or oversized messages
+                                if len == 0 || len > 65535 {
+                                    stats.malformed.fetch_add(1, Ordering::Relaxed);
+                                    return;
+                                }
+                                let mut data = vec![0u8; len];
+                                if stream.read_exact(&mut data).await.is_ok() {
+                                    if extract_domain(&data) == "unknown" {
+                                        stats.malformed.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    let _ = handle_query(None, Some(stream), client, resolver_url, target_url, proxy_url, Bytes::from(data), peer, stats, cache, cache_ttl, exclude_suffixes).await;
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        native_log("WARN", &format!("TCP accept error: {}", e));
+                        // Brief back-off to avoid spinning on repeated accept failures
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                 }
             }
          })
@@ -566,7 +667,7 @@ async fn handle_query(
     stats: Arc<Stats>,
     cache: DnsCache,
     cache_ttl_default: u64,
-    exclude_domain: Option<String>,
+    exclude_suffixes: Option<String>,
 ) -> Result<()> {
     if data.len() < 12 {
         return Err(anyhow::anyhow!("DNS message too short"));
@@ -574,28 +675,70 @@ async fn handle_query(
 
     let original_id = [data[0], data[1]];
     let domain = extract_domain(&data);
-    let should_cache = if let Some(ref exclude) = exclude_domain {
-        !domain.eq_ignore_ascii_case(exclude)
+    let should_cache = if let Some(ref suffixes) = exclude_suffixes {
+        !suffixes.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .any(|suffix| domain.eq_ignore_ascii_case(suffix) || domain.ends_with(&format!(".{}", suffix)))
     } else {
         true
     };
 
-    if should_cache && data.len() > 2 {
-        let cache_key = data.slice(2..);
-        if let Some((cached_resp, expiry)) = cache.get(&cache_key).await {
+    let cache_key = data.slice(2..);
+
+    if should_cache {
+        if let Some((cached_resp, expiry)) = cache.get(&cache_key) {
             if Instant::now() < expiry {
-                let remaining = expiry.duration_since(Instant::now()).as_secs();
-                let mut resp = vec![0u8; cached_resp.len()];
-                resp.copy_from_slice(&cached_resp);
-                // Restore original ID
+                // Arc<Bytes> — clone is O(1), no heap allocation for cache hits
+                let mut resp = cached_resp.to_vec();
                 resp[0] = original_id[0];
                 resp[1] = original_id[1];
-                
+                zero_ttls_in_response(&mut resp);
                 stats.cache_hits.fetch_add(1, Ordering::Relaxed);
-                add_query_log(domain, format!("OK (Cache, TTL {})", remaining));
+                add_query_log(domain, "OK (Cache)".to_string());
                 return send_response(udp_sock, tcp_stream, Bytes::from(resp), peer).await;
             } else {
-                cache.invalidate(&cache_key).await;
+                cache.invalidate(&cache_key);
+            }
+        }
+    }
+
+    stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+
+    // ── In-flight deduplication ───────────────────────────────────────────────
+    // If another task is already fetching this exact question, subscribe and
+    // wait for its result instead of firing a duplicate ODoH request.
+    let (is_leader, rx) = {
+        let mut inflight = INFLIGHT.lock().unwrap();
+        if let Some(waiters) = inflight.get_mut(&cache_key) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            waiters.push(tx);
+            (false, Some(rx))
+        } else {
+            inflight.insert(cache_key.clone(), Vec::new());
+            (true, None)
+        }
+    };
+
+    if !is_leader {
+        // Follower: wait for the leader's result
+        match rx.unwrap().await {
+            Ok(Ok(dns_resp)) => {
+                let mut resp = dns_resp.to_vec();
+                resp[0] = original_id[0];
+                resp[1] = original_id[1];
+                zero_ttls_in_response(&mut resp);
+                stats.cache_hits.fetch_add(1, Ordering::Relaxed);
+                stats.cache_misses.fetch_sub(1, Ordering::Relaxed); // was not a true miss
+                add_query_log(domain, "OK (Dedup)".to_string());
+                return send_response(udp_sock, tcp_stream, Bytes::from(resp), peer).await;
+            }
+            Ok(Err(e)) => {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+                return Err(anyhow::anyhow!("Dedup leader failed: {}", e));
+            }
+            Err(_) => {
+                // Leader dropped without sending — fall through to our own fetch
             }
         }
     }
@@ -633,20 +776,22 @@ async fn handle_query(
             }
         }
 
-        let odoh_config = odoh_config_opt.unwrap();
-        let mut seed_bytes = [0u8; 32];
-        getrandom::fill(&mut seed_bytes).unwrap();
-        let mut rng = StdRng::from_seed(seed_bytes);
-        
+        let odoh_config = odoh_config_opt.expect("odoh_config_opt is Some after fetch/check");
         let padded_len = if data.len() <= 128 { 128 } else { data.len().next_power_of_two() };
         let padding = padded_len.saturating_sub(data.len());
-        
-        let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, padding); 
+        let query_plaintext = ObliviousDoHMessagePlaintext::new(&data, padding);
         let config_contents: ObliviousDoHConfigContents = odoh_config.into();
-        let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?; 
-        let req_bytes = compose(&encrypted_query_msg)?.freeze(); 
 
-        native_log("DEBUG", &format!("Sending ODoH query for {} to {} (padded to {} bytes, attempt {})", domain, resolver_url, padded_len, attempt));
+        // Scope the rng tightly so it is dropped before the first .await.
+        // ThreadRng contains Rc<> and is !Send — it cannot live across an await
+        // point inside tokio::spawn. rand::rng() is the rand 0.9 name for thread_rng().
+        let (req_bytes, client_secret) = {
+            let mut rng = rand::rng();
+            let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?;
+            (compose(&encrypted_query_msg)?.freeze(), client_secret)
+        }; // rng dropped here, before any .await 
+
+        #[cfg(debug_assertions)] native_log("DEBUG", &format!("Sending ODoH query for {} to {} (padded to {} bytes, attempt {})", domain, resolver_url, padded_len, attempt));
 
         let resp = client.post(&*resolver_url)
             .header("content-type", "application/oblivious-dns-message")
@@ -658,50 +803,52 @@ async fn handle_query(
             .send()
             .await;
 
-        // Fallback logic for different relay styles
+        // Fallback logic for different relay styles.
+        // We capture the status *before* dropping the borrow so we can
+        // reassign retry_resp inside the same block without fighting the borrow checker.
+        let initial_status = resp.as_ref().ok().map(|r| r.status());
         let mut retry_resp = resp;
-        if let Ok(ref r) = retry_resp {
-            let status = r.status();
-            if status == reqwest::StatusCode::METHOD_NOT_ALLOWED || status.as_u16() == 530 || status == reqwest::StatusCode::NOT_FOUND {
-                 native_log("WARN", &format!("Relay returned {}, trying fallback...", status));
-                 
-                 if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
-                     // Try GET fallback
-                     let b64_query = URL_SAFE_NO_PAD.encode(&req_bytes);
-                     let mut get_url = Url::parse(&*resolver_url)?;
-                     get_url.query_pairs_mut().append_pair("dns", &b64_query);
-                     
-                                      native_log("INFO", &format!("Trying GET fallback: {}", get_url));
-                     
-                                      retry_resp = client.get(get_url)
-                     
-                                         .header("accept", "application/oblivious-dns-message")
-                     
-                                         .header("user-agent", "oxidoh/0.3.0")
-                     
-                                         .send()
-                     
-                                         .await;
-                     
-                     
-                 } else if let Some(ref base_proxy) = proxy_url_str {
-                     // Try path-based fallback
-                     let target_url = Url::parse(&*target_url_str).unwrap();
-                     let fallback_url = format!("{}/{}{}", 
-                        base_proxy.trim_end_matches('/'), 
-                        target_url.host_str().unwrap_or(""), 
+
+        if let Some(status) = initial_status {
+            let needs_fallback = status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+                || status.as_u16() == 530
+                || status == reqwest::StatusCode::NOT_FOUND;
+
+            if needs_fallback {
+                native_log("WARN", &format!("Relay returned {}, trying fallback...", status));
+
+                if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+                    // GET fallback: encode the encrypted query as a base64url query param
+                    let b64_query = URL_SAFE_NO_PAD.encode(&req_bytes);
+                    let mut get_url = Url::parse(&*resolver_url)?;
+                    get_url.query_pairs_mut().append_pair("dns", &b64_query);
+                    native_log("INFO", &format!("Trying GET fallback: {}", get_url));
+                    retry_resp = client
+                        .get(get_url)
+                        .header("accept", "application/oblivious-dns-message")
+                        .header("user-agent", "oxidoh/0.3.0")
+                        .send()
+                        .await;
+                } else if let Some(ref base_proxy) = proxy_url_str {
+                    // Path-based fallback: embed target host+path in the relay URL
+                    let target_url = Url::parse(&*target_url_str)
+                        .context("Failed to parse target URL for fallback")?;
+                    let fallback_url = format!(
+                        "{}/{}{}", 
+                        base_proxy.trim_end_matches('/'),
+                        target_url.host_str().unwrap_or(""),
                         target_url.path()
-                     );
-                                      native_log("INFO", &format!("Path-based fallback URL: {}", fallback_url));
-                                      retry_resp = client.post(&fallback_url)
-                                         .header("content-type", "application/oblivious-dns-message")
-                                         .header("accept", "application/oblivious-dns-message")
-                                         .header("user-agent", "oxidoh/0.3.0")
-                                         .body(req_bytes.clone())
-                                         .send()
-                                         .await;
-                     
-                 }
+                    );
+                    native_log("INFO", &format!("Path-based fallback URL: {}", fallback_url));
+                    retry_resp = client
+                        .post(&fallback_url)
+                        .header("content-type", "application/oblivious-dns-message")
+                        .header("accept", "application/oblivious-dns-message")
+                        .header("user-agent", "oxidoh/0.3.0")
+                        .body(req_bytes.clone())
+                        .send()
+                        .await;
+                }
             }
         }
 
@@ -741,17 +888,49 @@ async fn handle_query(
                 stats.latency_count.fetch_add(1, Ordering::Relaxed);
                 add_query_log(domain.clone(), format!("OK ({}ms, att {})", latency, attempt));
 
-                if should_cache && data.len() > 2 && dns_resp.len() > 2 {
+                // Cache the raw response (with real TTLs) for reuse.
+                // Negative responses (NXDOMAIN / NODATA) are also cached using
+                // the SOA minimum TTL from the authority section, preventing
+                // repeated upstream lookups for non-existent domains.
+                if should_cache && dns_resp.len() > 2 {
                     let mut ttl = cache_ttl_default;
                     if let Ok(msg) = Message::from_vec(&dns_resp) {
-                        ttl = msg.answers().iter().map(|a| a.ttl()).min().unwrap_or(cache_ttl_default as u32).into();
-                        if ttl < 10 { ttl = 10; }
-                        if ttl > 3600 { ttl = 3600; }
+                        let rcode = msg.response_code();
+                        let is_negative = rcode == hickory_resolver::proto::op::ResponseCode::NXDomain
+                            || (rcode == hickory_resolver::proto::op::ResponseCode::NoError
+                                && msg.answers().is_empty());
+                        if is_negative {
+                            // Use SOA minimum TTL for negative caching (RFC 2308)
+                            ttl = msg.name_servers().iter()
+                                .filter_map(|rr| {
+                                    if let hickory_resolver::proto::rr::RData::SOA(soa) = rr.data() {
+                                        Some(soa.minimum() as u64)
+                                    } else { None }
+                                })
+                                .next()
+                                .unwrap_or(60)
+                                .clamp(30, 300);
+                        } else {
+                            ttl = msg.answers().iter().map(|a| a.ttl()).min()
+                                .unwrap_or(cache_ttl_default as u32) as u64;
+                            ttl = ttl.clamp(10, 3600);
+                        }
                     }
                     let expiry = Instant::now() + Duration::from_secs(ttl);
-                    cache.insert(data.slice(2..), (Bytes::copy_from_slice(&dns_resp), expiry)).await;
+                    cache.insert(cache_key.clone(), (Bytes::copy_from_slice(&dns_resp), expiry));
                 }
-                
+
+                // Notify in-flight waiters — Arc so all waiters share one allocation
+                {
+                    let shared = Arc::new(Bytes::copy_from_slice(&dns_resp));
+                    let mut inflight = INFLIGHT.lock().unwrap();
+                    if let Some(waiters) = inflight.remove(&cache_key) {
+                        for tx in waiters {
+                            let _ = tx.send(Ok(Bytes::clone(&shared)));
+                        }
+                    }
+                }
+
                 final_resp = Some(dns_resp);
                 break;
             }
@@ -761,9 +940,24 @@ async fn handle_query(
         }
     }
 
-    if let Some(resp) = final_resp {
+    if let Some(dns_resp) = final_resp {
+        let mut resp = dns_resp.to_vec();
+        resp[0] = original_id[0];
+        resp[1] = original_id[1];
+        zero_ttls_in_response(&mut resp);
         send_response(udp_sock, tcp_stream, Bytes::from(resp), peer).await
     } else {
+        // Notify waiters of failure before returning error
+        {
+            let mut inflight = INFLIGHT.lock().unwrap();
+            if let Some(waiters) = inflight.remove(&cache_key) {
+                let err_str = last_err.as_ref().map(|e| e.to_string())
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                for tx in waiters {
+                    let _ = tx.send(Err(err_str.clone()));
+                }
+            }
+        }
         stats.errors.fetch_add(1, Ordering::Relaxed);
         let err_msg = if let Some(ref e) = last_err { e.to_string() } else { "Unknown error".to_string() };
         native_log("ERROR", &format!("Request for {} failed after 3 attempts: {}", domain, err_msg));
@@ -781,19 +975,74 @@ async fn handle_query(
     }
 }
 
+/// Zero out all TTL fields in a DNS response so the Android resolver always
+/// re-queries us.  Our cache manages real freshness; this keeps latency low by
+/// preventing the OS from caching stale entries between restarts.
+fn zero_ttls_in_response(resp: &mut Vec<u8>) {
+    // DNS wire format: 12-byte header, then question section, then RR sections.
+    // Each resource record has: name (variable), type(2), class(2), TTL(4), rdlength(2), rdata.
+    // We skip the question section and zero TTL bytes in answer/authority/additional.
+    if resp.len() < 12 { return; }
+    let ancount = u16::from_be_bytes([resp[6], resp[7]]) as usize;
+    let nscount = u16::from_be_bytes([resp[8], resp[9]]) as usize;
+    let arcount = u16::from_be_bytes([resp[10], resp[11]]) as usize;
+    let qdcount = u16::from_be_bytes([resp[4], resp[5]]) as usize;
+    let total_rrs = ancount + nscount + arcount;
+    if total_rrs == 0 { return; }
+
+    let mut pos = 12usize;
+    // Skip question section
+    for _ in 0..qdcount {
+        // Skip name
+        while pos < resp.len() {
+            let len = resp[pos] as usize;
+            if len == 0 { pos += 1; break; }
+            if (len & 0xC0) == 0xC0 { pos += 2; break; } // pointer
+            pos += len + 1;
+        }
+        pos += 4; // qtype + qclass
+    }
+    // Zero TTL in each RR
+    for _ in 0..total_rrs {
+        if pos >= resp.len() { break; }
+        // Skip name
+        while pos < resp.len() {
+            let len = resp[pos] as usize;
+            if len == 0 { pos += 1; break; }
+            if (len & 0xC0) == 0xC0 { pos += 2; break; }
+            pos += len + 1;
+        }
+        if pos + 10 > resp.len() { break; }
+        pos += 4; // type + class
+        // Zero TTL (4 bytes)
+        resp[pos] = 0; resp[pos+1] = 0; resp[pos+2] = 0; resp[pos+3] = 0;
+        pos += 4;
+        let rdlen = u16::from_be_bytes([resp[pos], resp[pos+1]]) as usize;
+        pos += 2 + rdlen;
+    }
+}
+
 async fn send_response(
     udp_sock: Option<Arc<UdpSocket>>,
     mut tcp_stream: Option<tokio::net::TcpStream>,
     data: Bytes,
     peer: SocketAddr
 ) -> Result<()> {
-    native_log("DEBUG", &format!("Sending response of {} bytes back to {}", data.len(), peer));
+    #[cfg(debug_assertions)] native_log("DEBUG", &format!("Sending response of {} bytes back to {}", data.len(), peer));
     if let Some(s) = udp_sock {
         s.send_to(&data, peer).await?;
     } else if let Some(s) = &mut tcp_stream {
-        let len = (data.len() as u16).to_be_bytes();
-        s.write_all(&len).await?;
-        s.write_all(&data).await?;
+        // RFC 1035 §4.2.2: DNS/TCP messages are prefixed with a 2-byte length.
+        // A response larger than 65535 bytes is malformed; return an error rather
+        // than silently truncating the length field.
+        let len = u16::try_from(data.len())
+            .map_err(|_| anyhow::anyhow!("DNS response too large for TCP framing ({} bytes)", data.len()))?;
+        // Single vectored write: length prefix + data in one syscall
+        let len_bytes = len.to_be_bytes();
+        let mut framed = Vec::with_capacity(2 + data.len());
+        framed.extend_from_slice(&len_bytes);
+        framed.extend_from_slice(&data);
+        s.write_all(&framed).await?;
     }
     Ok(())
 }
@@ -830,7 +1079,7 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, 
         if let Some(addrs) = hosts.get(domain) {
             if !addrs.is_empty() {
                 native_log("INFO", &format!("Using cached/hardcoded bootstrap for {}: {:?}", domain, addrs));
-                return Ok(addrs.clone());
+                return Ok(addrs.to_vec());
             }
         }
     }
@@ -901,17 +1150,18 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
     let mut builder = Client::builder()
         .user_agent("OxidOH/0.3.0")
         .dns_resolver(resolver)
-        .use_rustls_tls() 
-        .danger_accept_invalid_certs(true) // Required for some ODoH proxies/relays
+        .use_rustls_tls()
         .http2_adaptive_window(true)
         .tcp_keepalive(Some(Duration::from_secs(60)))
         .pool_idle_timeout(Duration::from_secs(60))
-        .pool_max_idle_per_host(16) 
+        .pool_max_idle_per_host(16)
         .connect_timeout(Duration::from_secs(15));
 
-    // Some proxies like Hiddify might have certificate issues (CA used as End Entity)
+    // Some ODoH proxies/relays (e.g. Hiddify) present CA certs as end-entity certs.
+    // Only bypass TLS verification when a proxy is configured; direct target connections
+    // should always be fully verified.
     if config.odoh_proxy_url.is_some() {
-        native_log("WARN", "ODoH Proxy configured: allowing invalid certificates for compatibility");
+        native_log("WARN", "ODoH Proxy configured: allowing invalid certificates for proxy compatibility");
         builder = builder.danger_accept_invalid_certs(true);
     }
 
@@ -928,8 +1178,12 @@ fn create_client(config: &Config, resolver: Arc<DynamicResolver>) -> Result<Clie
 }
 
 fn extract_urls(input: &str) -> Vec<String> {
-    let re = regex::Regex::new(r"(https?|ftp|file)://[-A-Za-z0-9+&@#/%?=~_|!:,.;]+[-A-Za-z0-9+&@#/%=~_|]").unwrap();
-    re.find_iter(input)
+    // Compile the regex only once for the lifetime of the process.
+    static URL_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(https?|ftp|file)://[-A-Za-z0-9+&@#/%?=~_|!:,.;]+[-A-Za-z0-9+&@#/%=~_|]")
+            .expect("URL regex is valid")
+    });
+    URL_RE.find_iter(input)
         .map(|m| m.as_str().to_string())
         .collect()
 }
@@ -1038,7 +1292,7 @@ pub mod jni_api {
             ca_path: None,
             statistic_interval: 0,
             cache_ttl: cache_ttl as u64,
-            exclude_domain: if exclude_domain.is_empty() { None } else { Some(exclude_domain) },
+            exclude_suffixes: if exclude_domain.is_empty() { None } else { Some(exclude_domain) },
         };
 
         let token = CancellationToken::new();
@@ -1049,10 +1303,9 @@ pub mod jni_api {
         }
         
         let stats = Arc::new(Stats::new());
-        RUNTIME.block_on(async {
-            let mut w = GLOBAL_STATS.write().await;
+        if let Ok(mut w) = GLOBAL_STATS.write() {
             *w = Some(stats.clone());
-        });
+        }
 
         let _handle = RUNTIME.spawn(async move {
             native_log("INFO", "Proxy task started inside runtime");
@@ -1062,10 +1315,12 @@ pub mod jni_api {
                 native_log("INFO", "Cancellation token triggered, sending shutdown signal");
                 let _ = tx.send(());
             });
+            native_log("INFO", "Calling run_proxy...");
             match run_proxy(config, stats, rx).await {
                 Ok(_) => native_log("INFO", "run_proxy exited gracefully"),
                 Err(e) => native_log("ERROR", &format!("run_proxy exited with error: {:?}", e)),
             }
+            native_log("INFO", "Proxy task finished");
         });
         
         native_log("INFO", "Proxy task spawned");
@@ -1102,27 +1357,28 @@ pub mod jni_api {
         env: JNIEnv,
         _class: JClass,
     ) -> jni::sys::jintArray {
-        let stats_opt = RUNTIME.block_on(async {
-            GLOBAL_STATS.read().await.clone()
-        });
+        let stats_opt = GLOBAL_STATS.read().ok().and_then(|g| g.clone());
+        let cache_size = GLOBAL_CACHE.read().ok()
+            .and_then(|g| g.as_ref().map(|c| c.len()))
+            .unwrap_or(0);
 
-        let mut values = [0i32; 8];
+        let mut values = [0i32; 10];
         if let Some(stats) = stats_opt {
             values[0] = stats.queries_udp.load(Ordering::Relaxed) as i32;
             values[1] = stats.queries_tcp.load(Ordering::Relaxed) as i32;
             values[2] = stats.malformed.load(Ordering::Relaxed) as i32;
             values[3] = (stats.queries_udp.load(Ordering::Relaxed) + stats.queries_tcp.load(Ordering::Relaxed)) as i32;
-            
             values[4] = stats.queries_https.load(Ordering::Relaxed) as i32;
             values[5] = stats.cache_hits.load(Ordering::Relaxed) as i32;
             values[6] = stats.errors.load(Ordering::Relaxed) as i32;
-            
             let t_lat = stats.total_latency.load(Ordering::Relaxed);
             let count = stats.latency_count.load(Ordering::Relaxed);
             values[7] = if count > 0 { (t_lat / count) as i32 } else { 0 };
+            values[8] = stats.cache_misses.load(Ordering::Relaxed) as i32;
+            values[9] = cache_size as i32;
         }
 
-        let array = env.new_int_array(8).unwrap();
+        let array = env.new_int_array(10).unwrap();
         env.set_int_array_region(&array, 0, &values).unwrap();
         array.into_raw()
     }
@@ -1132,13 +1388,12 @@ pub mod jni_api {
         _env: JNIEnv,
         _class: JClass,
     ) {
-        if let Some(stats) = RUNTIME.block_on(async {
-            GLOBAL_STATS.read().await.clone()
-        }) {
+        if let Some(stats) = GLOBAL_STATS.read().ok().and_then(|g| g.clone()) {
             stats.queries_udp.store(0, Ordering::Relaxed);
             stats.queries_tcp.store(0, Ordering::Relaxed);
             stats.queries_https.store(0, Ordering::Relaxed);
             stats.cache_hits.store(0, Ordering::Relaxed);
+            stats.cache_misses.store(0, Ordering::Relaxed);
             stats.malformed.store(0, Ordering::Relaxed);
             stats.errors.store(0, Ordering::Relaxed);
             stats.total_latency.store(0, Ordering::Relaxed);
@@ -1152,10 +1407,12 @@ pub mod jni_api {
         _env: JNIEnv,
         _class: JClass,
     ) {
-         let mut lock = CANCELLATION_TOKEN.lock().unwrap();
-         if let Some(token) = lock.take() {
-             token.cancel();
-         }
+        let mut lock = CANCELLATION_TOKEN.lock().unwrap();
+        if let Some(token) = lock.take() {
+            token.cancel();
+        }
+        // Signal the native log thread to drain and exit cleanly
+        let _ = NATIVE_LOG_SENDER.send(NativeLog::Shutdown);
     }
 
     #[unsafe(no_mangle)]
@@ -1163,15 +1420,14 @@ pub mod jni_api {
         _env: JNIEnv,
         _class: JClass,
     ) {
-        RUNTIME.spawn(async {
-            if let Some(cache) = &*GLOBAL_CACHE.read().await {
+        if let Ok(guard) = GLOBAL_CACHE.read() {
+            if let Some(cache) = guard.as_ref() {
                 cache.invalidate_all();
-                cache.run_pending_tasks().await;
                 native_log("INFO", "DNS Cache cleared successfully");
             } else {
                 native_log("WARN", "DNS Cache clear failed: Cache not initialized");
             }
-        });
+        }
     }
 
     #[unsafe(no_mangle)]

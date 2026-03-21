@@ -63,9 +63,9 @@ struct Args {
     #[arg(long, default_value_t = 60)]
     cache_ttl: u64,
 
-    /// Optional domain to exclude from cache
+    /// Comma-separated domain suffixes to exclude from cache (e.g. "example.com,local")
     #[arg(short = 'e', long)]
-    exclude_domain: Option<String>,
+    exclude_suffixes: Option<String>,
 }
 
 #[tokio::main]
@@ -93,11 +93,18 @@ async fn main() -> Result<()> {
         ca_path: None,
         statistic_interval: args.statistic_interval,
         cache_ttl: args.cache_ttl,
-        exclude_domain: args.exclude_domain,
+        exclude_suffixes: args.exclude_suffixes,
     };
 
     let stats = Arc::new(Stats::new());
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Handle Ctrl+C / SIGTERM so the proxy shuts down gracefully.
+    // The sender must be kept alive for the lifetime of the proxy.
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        let _ = shutdown_tx.send(());
+    });
 
     run_proxy(config, stats, shutdown_rx).await?;
 
