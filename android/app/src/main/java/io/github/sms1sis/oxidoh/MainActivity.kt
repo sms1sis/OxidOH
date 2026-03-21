@@ -97,7 +97,7 @@ class MainActivity : ComponentActivity() {
                 onDispose {}
             }
 
-            OxidOHTheme(darkTheme = darkTheme, amoled = amoled) {
+            OxidOHTheme(darkTheme = darkTheme, amoled = amoled, dynamicColor = false) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
@@ -340,7 +340,9 @@ class MainActivity : ComponentActivity() {
         ModalNavigationDrawer(
             drawerState = drawerState,
             drawerContent = {
-                ModalDrawerSheet {
+                ModalDrawerSheet(
+                    drawerContainerColor = MaterialTheme.colorScheme.surface
+                ) {
                     DrawerContent(
                         themeMode = themeMode,
                         autoStart = autoStart,
@@ -395,107 +397,105 @@ class MainActivity : ComponentActivity() {
             }
         ) {
             Scaffold(
+                containerColor = MaterialTheme.colorScheme.background,
                 topBar = {
                     CenterAlignedTopAppBar(
-                        modifier = Modifier.clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)),
-                        title = { 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Shield, null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.primary)
-                                Spacer(Modifier.width(8.dp))
-                                Text("OxidOH", fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp)
+                        title = {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Icon(Icons.Default.Shield, null, modifier = Modifier.size(20.dp),
+                                    tint = MaterialTheme.colorScheme.primary)
+                                Text("OXIDOH", fontWeight = FontWeight.Black, letterSpacing = 4.sp,
+                                    color = MaterialTheme.colorScheme.primary)
                             }
                         },
                         navigationIcon = {
                             Surface(
                                 onClick = { scope.launch { drawerState.open() } },
-                                shape = RoundedCornerShape(12.dp),
-                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
-                                modifier = Modifier.padding(start = 12.dp).size(40.dp)
+                                shape = RoundedCornerShape(2.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.padding(start = 12.dp).size(38.dp)
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Filled.Menu, "Menu", modifier = Modifier.size(24.dp))
+                                    Icon(Icons.Filled.Menu, "Menu", modifier = Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.primary)
                                 }
                             }
                         },
                         actions = {
-                            if (isRunning) {
+                            if (isRunning && latency > 0) {
+                                val latColor = when {
+                                    latency < 150 -> io.github.sms1sis.oxidoh.ui.theme.NeonGreen
+                                    latency < 400 -> io.github.sms1sis.oxidoh.ui.theme.AmberAlert
+                                    else -> io.github.sms1sis.oxidoh.ui.theme.CrimsonThreat
+                                }
                                 Surface(
-                                    color = (if (latency < 150) Color(0xFF4CAF50) else Color(0xFFFFC107)).copy(alpha = 0.15f),
-                                    shape = RoundedCornerShape(12.dp),
-                                    modifier = Modifier.padding(end = 12.dp).height(40.dp),
-                                    border = BorderStroke(1.dp, (if (latency < 150) Color(0xFF4CAF50) else Color(0xFFFFC107)).copy(alpha = 0.3f))
+                                    color = latColor.copy(alpha = 0.08f),
+                                    shape = RoundedCornerShape(2.dp),
+                                    modifier = Modifier.padding(end = 12.dp).height(38.dp),
+                                    border = BorderStroke(1.dp, latColor.copy(alpha = 0.4f))
                                 ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Box(Modifier.size(8.dp).background(if (latency < 150) Color(0xFF4CAF50) else Color(0xFFFFC107), CircleShape))
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("${latency}ms", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                    Row(modifier = Modifier.padding(horizontal = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Box(Modifier.size(5.dp).background(latColor, CircleShape))
+                                        Text("${latency}ms", style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold, color = latColor, letterSpacing = 1.sp)
                                     }
                                 }
                             } else {
-                                Spacer(Modifier.width(52.dp))
+                                Spacer(Modifier.width(50.dp))
                             }
                         },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surface)
                     )
                 },
                 bottomBar = {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
-                        tonalElevation = 0.dp 
+                    Box(modifier = Modifier.fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surface)
                     ) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant, thickness = 0.5.dp)
                         Row(
                             modifier = Modifier
                                 .windowInsetsPadding(WindowInsets.navigationBars)
-                                .height(64.dp)
+                                .height(60.dp)
                                 .fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             listOf(
-                                Icons.Filled.Dashboard to stringResource(R.string.tab_app),
-                                Icons.AutoMirrored.Filled.ListAlt to stringResource(R.string.tab_activity),
-                                Icons.Filled.BarChart to stringResource(R.string.tab_stats)
+                                Icons.Filled.Dashboard to "RADAR",
+                                Icons.AutoMirrored.Filled.ListAlt to "COMMS",
+                                Icons.Filled.BarChart to "TELEM"
                             ).forEachIndexed { index, pair ->
                                 val selected = currentTab == index
-                                val color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                                val bgColor = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else Color.Transparent
-                                
+                                val color = if (selected) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurfaceVariant
                                 Column(
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(16.dp))
+                                        .clip(RoundedCornerShape(2.dp))
                                         .clickable { currentTab = index }
-                                        .background(bgColor)
-                                        .padding(horizontal = 24.dp, vertical = 8.dp),
+                                        .background(if (selected) MaterialTheme.colorScheme.primary.copy(0.08f) else Color.Transparent)
+                                        .padding(horizontal = 20.dp, vertical = 8.dp),
                                     horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.Center
+                                    verticalArrangement = Arrangement.spacedBy(3.dp)
                                 ) {
-                                    Icon(pair.first, null, tint = color, modifier = Modifier.size(24.dp))
+                                    Icon(pair.first, null, tint = color, modifier = Modifier.size(20.dp))
+                                    Text(pair.second, style = MaterialTheme.typography.labelSmall,
+                                        color = color, letterSpacing = 1.5.sp, fontSize = 8.sp)
                                 }
                             }
                         }
                     }
                 }
             ) { contentPadding ->
+
                 Box(modifier = Modifier
                     .padding(contentPadding)
                     .consumeWindowInsets(contentPadding)
                     .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
                     .fillMaxSize()) {
-                    if (isRunning) {
-                        Box(Modifier.fillMaxSize().background(
-                            Brush.radialGradient(
-                                colors = listOf(MaterialTheme.colorScheme.primary.copy(alpha = 0.05f), Color.Transparent),
-                                center = androidx.compose.ui.geometry.Offset(500f, 500f),
-                                radius = 1000f
-                            )
-                        ))
-                    }
 
                     when (currentTab) {
                         0 -> DashboardScreen(

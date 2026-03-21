@@ -2,30 +2,32 @@ package io.github.sms1sis.oxidoh.ui.screens
 
 import android.content.ClipData
 import android.content.Context
-import android.util.Log
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CloudQueue
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.sms1sis.oxidoh.ProxyService
 import io.github.sms1sis.oxidoh.R
+import io.github.sms1sis.oxidoh.ui.theme.*
 import kotlinx.coroutines.launch
 
 @Composable
@@ -34,108 +36,135 @@ fun LogScreen(logs: Array<String>) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    
+
+    // Resolve colors
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val onSurfaceVariantColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val surfaceContainerHighColor = MaterialTheme.colorScheme.surfaceContainerHigh
+    val onSurfaceColor = MaterialTheme.colorScheme.onSurface
+    val errorColor = MaterialTheme.colorScheme.error
+
     LaunchedEffect(logs.size) {
-        if (logs.isNotEmpty()) {
-            listState.animateScrollToItem(logs.size - 1)
-        }
+        if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(vertical = 24.dp)) {
+    Column(modifier = Modifier.fillMaxSize()) {
+
+        // ── Header ────────────────────────────────────────────────────────────
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(stringResource(R.string.network_activity), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            
+            Column {
+                Text("INTERCEPT LOG", style = MaterialTheme.typography.headlineSmall,
+                    color = primaryColor, letterSpacing = 3.sp)
+                Text("// ${logs.size} ENTRIES CAPTURED",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = onSurfaceVariantColor, letterSpacing = 1.sp)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Clear Logs Button
-                Surface(
-                    onClick = { 
-                        ProxyService.clearLogs()
-                        android.widget.Toast.makeText(context, context.getString(R.string.logs_cleared), android.widget.Toast.LENGTH_SHORT).show()
-                    },
-                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f),
-                    shape = CircleShape,
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.DeleteOutline, stringResource(R.string.clear_logs), modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onErrorContainer)
+                HudIconButton(Icons.Default.DeleteOutline, errorColor) {
+                    ProxyService.clearLogs()
+                    android.widget.Toast.makeText(context,
+                        context.getString(R.string.logs_cleared), android.widget.Toast.LENGTH_SHORT).show()
+                }
+                HudIconButton(Icons.Default.ContentCopy, primaryColor) {
+                    if (logs.isNotEmpty()) scope.launch {
+                        clipboard.setClipEntry(ClipEntry(
+                            ClipData.newPlainText("OxidOH Logs", logs.joinToString("\n"))))
+                        android.widget.Toast.makeText(context,
+                            context.getString(R.string.logs_copied), android.widget.Toast.LENGTH_SHORT).show()
                     }
                 }
-
-                // Copy Logs Button
-                Surface(
-                    onClick = { 
-                        if (logs.isNotEmpty()) {
-                            val logText = logs.joinToString("\n")
-                            scope.launch {
-                                clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("OxidOH Logs", logText)))
-                                android.widget.Toast.makeText(context, context.getString(R.string.logs_copied), android.widget.Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    },
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    shape = CircleShape,
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.ContentCopy, stringResource(R.string.copy_logs), modifier = Modifier.size(20.dp))
-                    }
-                }
-
-                // Save Logs Button
-                Surface(
-                    onClick = { saveLogsToFile(context, logs) },
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = CircleShape,
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.FileDownload, stringResource(R.string.save_logs), modifier = Modifier.size(20.dp))
-                    }
+                HudIconButton(Icons.Default.FileDownload, NeonGreen) {
+                    saveLogsToFile(context, logs)
                 }
             }
         }
-        Spacer(Modifier.height(20.dp))
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(horizontal = 12.dp), 
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+
+        // ── Terminal window ───────────────────────────────────────────────────
+        Box(modifier = Modifier
+            .fillMaxWidth()
+            .weight(1f)
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .background(surfaceContainerHighColor, RoundedCornerShape(2.dp))
+            .drawBehind {
+                // Left gutter line (terminal style)
+                drawLine(primaryColor.copy(0.2f),
+                    Offset(40.dp.toPx(), 0f), Offset(40.dp.toPx(), size.height), 0.8.dp.toPx())
+                // Top bar
+                drawLine(primaryColor.copy(0.4f),
+                    Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx())
+            }
         ) {
             if (logs.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Default.CloudQueue, null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.outline)
-                        Spacer(Modifier.height(12.dp))
-                        Text(stringResource(R.string.no_activity), color = MaterialTheme.colorScheme.outline)
-                    }
+                Column(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("_", color = primaryColor.copy(0.5f),
+                        style = MaterialTheme.typography.displaySmall)
+                    Spacer(Modifier.height(8.dp))
+                    Text("AWAITING INTERCEPTS...", color = onSurfaceVariantColor,
+                        style = MaterialTheme.typography.labelMedium, letterSpacing = 3.sp)
                 }
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    modifier = Modifier.fillMaxSize().padding(top = 4.dp),
                     contentPadding = PaddingValues(bottom = 16.dp)
                 ) {
-                    items(logs.size) { index ->
-                        Text(
-                            text = logs[index],
-                            style = androidx.compose.ui.text.TextStyle(
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                fontSize = 12.sp
-                            ),
-                            modifier = Modifier.padding(vertical = 8.dp)
-                        )
-                        if (index < logs.size - 1) {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    items(logs.size) { i ->
+                        val log = logs[i]
+                        val isOk    = log.contains("OK")
+                        val isError = log.contains("Error") || log.contains("error")
+                        val color = when {
+                            isError -> errorColor.copy(0.9f)
+                            isOk    -> NeonGreen.copy(0.9f)
+                            else    -> onSurfaceColor.copy(0.7f)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            // Line number gutter
+                            Text(
+                                "${(i + 1).toString().padStart(3, '0')}",
+                                modifier = Modifier.width(40.dp).padding(start = 8.dp),
+                                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp),
+                                color = onSurfaceVariantColor.copy(0.5f)
+                            )
+                            Text(
+                                log,
+                                modifier = Modifier.weight(1f).padding(end = 12.dp),
+                                style = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+                                    lineHeight = 16.sp),
+                                color = color
+                            )
                         }
                     }
                 }
             }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun HudIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    color: Color,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        color = color.copy(0.08f),
+        shape = RoundedCornerShape(2.dp),
+        modifier = Modifier.size(38.dp)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, null, modifier = Modifier.size(18.dp), tint = color)
         }
     }
 }
@@ -143,18 +172,18 @@ fun LogScreen(logs: Array<String>) {
 private fun saveLogsToFile(context: Context, logs: Array<String>) {
     if (logs.isEmpty()) return
     try {
-        val fileName = "OxidOH_Logs_${System.currentTimeMillis()}.txt"
-        val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-        val file = java.io.File(downloadsDir, fileName)
+        val fileName = "OxidOH_${System.currentTimeMillis()}.log"
+        val dir = android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_DOWNLOADS)
+        val file = java.io.File(dir, fileName)
         java.io.FileOutputStream(file).use { out ->
-            logs.forEach { line -> out.write((line + "\n").toByteArray()) }
+            logs.forEach { out.write((it + "\n").toByteArray()) }
         }
         android.media.MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
-        val msg = context.getString(R.string.saved_to_downloads)
-        android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+        android.widget.Toast.makeText(context,
+            context.getString(R.string.saved_to_downloads), android.widget.Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
-        Log.e("OxidOH", "Failed to save logs", e)
-        val msg = context.getString(R.string.failed_save_logs)
-        android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+        android.widget.Toast.makeText(context,
+            context.getString(R.string.failed_save_logs), android.widget.Toast.LENGTH_SHORT).show()
     }
 }
