@@ -15,8 +15,11 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.URL
 import java.nio.ByteBuffer
+import java.security.SecureRandom
 import java.util.concurrent.Executors
 
 class ProxyService : VpnService() {
@@ -26,9 +29,10 @@ class ProxyService : VpnService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var heartbeatJob: Job? = null
     private var forwardJob: Job? = null
-    private val dnsExecutor = Executors.newFixedThreadPool(8)
+    // Cached pool: grows under burst load, idles back down after 60s.
+    // Rust handles query parallelism; Kotlin just needs to dispatch quickly.
+    private val dnsExecutor = Executors.newCachedThreadPool()
     
-    private var currentHeartbeatDomain: String? = null
     
     // Active configuration tracking
     private var runningPort: Int = 0
@@ -94,10 +98,50 @@ class ProxyService : VpnService() {
     private external fun stopProxy()
 
     private var connectivityManager: android.net.ConnectivityManager? = null
+    private var lastNetwork: android.net.Network? = null
+    private var networkRestartJob: Job? = null
+    @Volatile private var proxyReady = false  // set true once waitForProxyReady succeeds
+
     private val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: android.net.Network) {
             super.onAvailable(network)
-            if (BuildConfig.DEBUG) Log.d(TAG, "Network available")
+            // registerDefaultNetworkCallback always fires onAvailable immediately with the
+            // current network on registration — ignore that first call by comparing network IDs.
+            if (lastNetwork == null) {
+                lastNetwork = network
+                if (BuildConfig.DEBUG) Log.d(TAG, "Network callback: initial network registered, ignoring")
+                return
+            }
+            if (network == lastNetwork) return  // same network, not a change
+            lastNetwork = network
+            if (!isProxyRunning || !proxyReady) {
+                if (BuildConfig.DEBUG) Log.d(TAG, "Network change seen but proxy not ready yet — skipping restart")
+                return
+            }
+            // Debounce: cancel any pending restart before scheduling a new one
+            networkRestartJob?.cancel()
+            networkRestartJob = serviceScope.launch(Dispatchers.IO) {
+                Log.i(TAG, "Network changed to $network — restarting proxy for fresh bootstrap")
+                delay(1500)
+                if (!isProxyRunning) return@launch
+                proxyReady = false
+                stopProxy()
+                delay(500)
+                startProxy(
+                    "127.0.0.1", runningPort, runningUrl, runningBootstrap,
+                    runningCacheTtl > 0, runningCacheTtl, runningTcpLimit,
+                    runningPollInterval, runningHttp3, runningHeartbeatDomain
+                )
+                val bound = waitForProxyReady(runningPort, timeoutMs = 30_000)
+                proxyReady = bound
+                if (!bound) Log.e(TAG, "Proxy did not rebind after network change")
+                else Log.i(TAG, "Proxy ready after network change")
+            }
+        }
+
+        override fun onLost(network: android.net.Network) {
+            super.onLost(network)
+            if (network == lastNetwork) lastNetwork = null
         }
     }
 
@@ -173,21 +217,24 @@ class ProxyService : VpnService() {
                 runningHeartbeatDomain = heartbeatDomain
                 runningExcludedApps = excludedApps
                 
-                serviceScope.launch {
-                    delay(1000)
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Initializing Rust proxy on 127.0.0.1:$listenPort")
-                    val res = startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain)
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Backend proxy initialized (result: $res)")
-                    
-                    if (heartbeatEnabled) {
-                        if (BuildConfig.DEBUG) Log.d(TAG, "Triggering post-restart heartbeat")
-                        startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
+                serviceScope.launch(Dispatchers.IO) {
+                    // Wait for the previous proxy instance to fully release the port
+                    delay(1500)
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Re-initializing Rust proxy on 127.0.0.1:$listenPort")
+                    val res = startProxy(
+                        "127.0.0.1", listenPort, resolverUrl, bootstrapDns,
+                        allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain
+                    )
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Backend proxy re-initialized (result=$res)")
+                    if (heartbeatEnabled && isProxyRunning) {
+                        delay(1000)
+                        startHeartbeat(resolverUrl, heartbeatInterval)
                     }
                 }
             } else {
                 if (BuildConfig.DEBUG) Log.d(TAG, "No config change, refreshing heartbeat only")
                 if (heartbeatEnabled) {
-                    startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
+                    startHeartbeat(resolverUrl, heartbeatInterval)
                 } else {
                     stopHeartbeat()
                 }
@@ -205,11 +252,6 @@ class ProxyService : VpnService() {
         runningHttp3 = useHttp3
         runningHeartbeatDomain = heartbeatDomain
         runningExcludedApps = excludedApps
-
-        serviceScope.launch {
-            if (BuildConfig.DEBUG) Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
-            startProxy("127.0.0.1", listenPort, resolverUrl, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain)
-        }
 
         try {
             val builder = Builder()
@@ -229,8 +271,6 @@ class ProxyService : VpnService() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 builder.allowBypass()
                 builder.addDisallowedApplication(packageName) // Always exclude ourselves
-                
-                // Exclude user-selected apps
                 excludedApps.forEach { pkg ->
                     try {
                         builder.addDisallowedApplication(pkg)
@@ -241,18 +281,49 @@ class ProxyService : VpnService() {
             }
 
             vpnInterface = builder.establish()
-            
             if (BuildConfig.DEBUG) Log.d(TAG, "VPN Interface established (IPv6: $allowIpv6)")
-            forwardJob = serviceScope.launch { 
-                delay(1000)
-                if (BuildConfig.DEBUG) Log.d(TAG, "Starting packet forwarding loop on port $listenPort")
-                forwardPackets(listenPort) 
+
+            // Fire startProxy() — it spawns the Rust runtime task and returns
+            // immediately (non-blocking JNI). The proxy does bootstrap DNS +
+            // ODoH config fetch before binding its UDP socket, so we must wait
+            // until the port is actually open before forwarding packets into it.
+            serviceScope.launch(Dispatchers.IO) {
+                if (BuildConfig.DEBUG) Log.d(TAG, "Starting Rust proxy on 127.0.0.1:$listenPort")
+                startProxy(
+                    "127.0.0.1", listenPort, resolverUrl, bootstrapDns,
+                    allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatDomain
+                )
+                if (BuildConfig.DEBUG) Log.d(TAG, "startProxy() returned, proxy task spawned")
             }
-            
+
+            // Poll until the Rust proxy UDP port is open, then start forwarding.
+            // Timeout after 30 s to avoid spinning forever if startup fails.
+            forwardJob = serviceScope.launch(Dispatchers.IO) {
+                if (BuildConfig.DEBUG) Log.d(TAG, "Waiting for Rust proxy to bind on port $listenPort...")
+                val bound = waitForProxyReady(listenPort, timeoutMs = 30_000)
+                if (!bound) {
+                    Log.e(TAG, "Rust proxy did not bind on port $listenPort within 30s — aborting")
+                    handleStop()
+                    return@launch
+                }
+                if (BuildConfig.DEBUG) Log.d(TAG, "Rust proxy ready — starting packet forwarding")
+                proxyReady = true
+                if (isActive && isProxyRunning) {
+                    forwardPackets(listenPort)
+                }
+                proxyReady = false
+            }
+
             if (heartbeatEnabled) {
-                startHeartbeat(heartbeatDomain, listenPort, heartbeatInterval)
+                // Give the Rust proxy a moment to bind before the first heartbeat ping.
+                // The heartbeat loop itself retries every interval so a single missed
+                // ping is harmless; this just avoids a guaranteed first-ping timeout.
+                serviceScope.launch {
+                    delay(3000)
+                    if (isProxyRunning) startHeartbeat(resolverUrl, heartbeatInterval)
+                }
             }
-            
+
         } catch (e: Exception) {
             Log.e(TAG, "Failed to establish VPN", e)
             handleStop()
@@ -261,47 +332,79 @@ class ProxyService : VpnService() {
         return START_STICKY
     }
 
-    private fun startHeartbeat(domain: String, port: Int, interval: Long) {
-        stopHeartbeat()
-        currentHeartbeatDomain = domain
-        heartbeatJob = serviceScope.launch {
-            val socket = DatagramSocket()
-            val address = InetAddress.getByName("127.0.0.1")
-            val query = constructDnsQuery(domain)
-            if (BuildConfig.DEBUG) Log.d(TAG, "Starting heartbeat loop for $domain on port $port")
+    /**
+     * Polls 127.0.0.1:[port] with a minimal UDP probe every 200 ms until the
+     * Rust proxy responds (any bytes back = bound) or [timeoutMs] elapses.
+     * Returns true if the proxy is ready, false if it timed out.
+     */
+    private fun waitForProxyReady(port: Int, timeoutMs: Long): Boolean {
+        val probe = byteArrayOf(
+            // Minimal valid DNS query for "." (root) type A — 17 bytes
+            0x00, 0x01,  // ID
+            0x01, 0x00,  // flags: standard query
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // counts
+            0x00,        // root label
+            0x00, 0x01,  // QTYPE A
+            0x00, 0x01   // QCLASS IN
+        )
+        val deadline = System.currentTimeMillis() + timeoutMs
+        val addr = java.net.InetAddress.getByName("127.0.0.1")
+        while (System.currentTimeMillis() < deadline && isProxyRunning) {
+            var sock: DatagramSocket? = null
             try {
-                while (isActive && isProxyRunning && currentHeartbeatDomain == domain) {
-                    val packet = DatagramPacket(query, query.size, address, port)
-                    socket.send(packet)
-                    if (BuildConfig.DEBUG) Log.d(TAG, "Sent heartbeat ping to localhost:$port") 
-                    delay(interval * 1000)
-                }
-            } catch (e: Exception) {
-                if (e !is CancellationException) {
-                    Log.e(TAG, "Heartbeat error", e)
-                }
+                sock = DatagramSocket()
+                sock.soTimeout = 200
+                sock.send(DatagramPacket(probe, probe.size, addr, port))
+                val buf = ByteArray(512)
+                sock.receive(DatagramPacket(buf, buf.size))
+                return true // got a response — proxy is up
+            } catch (_: Exception) {
+                // timeout or nothing yet — keep polling
             } finally {
-                socket.close()
-                if (BuildConfig.DEBUG) Log.d(TAG, "Heartbeat loop stopped")
+                try { sock?.close() } catch (_: Exception) {}
             }
+            Thread.sleep(200)
+        }
+        return false
+    }
+
+    private fun startHeartbeat(resolverUrl: String, interval: Long) {
+        stopHeartbeat()
+        heartbeatJob = serviceScope.launch(Dispatchers.IO) {
+            // Use direct HTTPS HEAD to the DoH resolver URL instead of DNS wire packets.
+            // This means:
+            //  - heartbeat activity never appears in query logs or stats counters
+            //  - no fake DNS traffic inflates UDP/cache-miss counters
+            //  - latency reflects real ODoH round-trip time
+            if (BuildConfig.DEBUG) Log.d(TAG, "Starting HTTPS heartbeat to $resolverUrl")
+            while (isActive && isProxyRunning) {
+                val start = System.currentTimeMillis()
+                try {
+                    val conn = URL(resolverUrl).openConnection() as HttpURLConnection
+                    conn.requestMethod = "HEAD"
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    conn.instanceFollowRedirects = false
+                    conn.setRequestProperty("User-Agent", "OxidOH-Heartbeat/1.0")
+                    conn.setRequestProperty("Connection", "close")
+                    conn.connect()
+                    val latencyMs = (System.currentTimeMillis() - start).toInt()
+                    conn.disconnect()
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Heartbeat RTT: ${latencyMs}ms")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Heartbeat failed: ${e.message}")
+                }
+                delay(interval * 1000L)
+            }
+            if (BuildConfig.DEBUG) Log.d(TAG, "Heartbeat loop stopped")
         }
     }
 
     private fun stopHeartbeat() {
-        currentHeartbeatDomain = null
         heartbeatJob?.cancel()
         heartbeatJob = null
-    }
-
-    private fun constructDnsQuery(domain: String): ByteArray {
-        val header = byteArrayOf(0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-        val body = mutableListOf<Byte>()
-        domain.split(".").forEach { part ->
-            body.add(part.length.toByte())
-            part.forEach { body.add(it.code.toByte()) }
-        }
-        body.add(0x00); body.add(0x00); body.add(0x01); body.add(0x00); body.add(0x01)
-        return header + body.toByteArray()
     }
 
     private suspend fun forwardPackets(proxyPort: Int) {
@@ -322,7 +425,12 @@ class ProxyService : VpnService() {
                             val ihl = (data[0].toInt() and 0x0F) * 4
                             val dPort = ((data[ihl + 2].toInt() and 0xFF) shl 8) or (data[ihl + 3].toInt() and 0xFF)
                             
-                            if (dPort == 53 || InetAddress.getByAddress(data.copyOfRange(16, 20)).hostAddress == "10.0.0.2") {
+                            // Compare dest IP bytes directly (10.0.0.2 = 0x0A,0x00,0x00,0x02)
+                        // Avoids InetAddress allocation + string comparison on every packet
+                        val dstIsDns = dPort == 53 ||
+                            (data[16] == 10.toByte() && data[17] == 0.toByte() &&
+                             data[18] == 0.toByte() && data[19] == 2.toByte())
+                        if (dstIsDns) {
                                 dnsExecutor.execute {
                                     try {
                                         val dnsPayload = data.copyOfRange(ihl + 8, length)
@@ -338,13 +446,14 @@ class ProxyService : VpnService() {
                                 }
                             }
                         } else if (version == 0x60) { // IPv6
-                            val nextHeader = data[6].toInt() and 0xFF
-                            if (nextHeader == 17) { // UDP
-                                val dPort = ((data[42].toInt() and 0xFF) shl 8) or (data[43].toInt() and 0xFF)
+                            // Walk extension headers to find actual UDP payload offset
+                            val udpOffset = findIpv6UdpOffset(data, length)
+                            if (udpOffset > 0) {
+                                val dPort = ((data[udpOffset].toInt() and 0xFF) shl 8) or (data[udpOffset + 1].toInt() and 0xFF)
                                 if (dPort == 53) {
                                     dnsExecutor.execute {
                                         try {
-                                            val dnsPayload = data.copyOfRange(48, length)
+                                            val dnsPayload = data.copyOfRange(udpOffset + 8, length)
                                             val response = handleDnsQuery(dnsPayload, proxyAddr, proxyPort)
                                             if (response != null) {
                                                 synchronized(outputStream) {
@@ -370,11 +479,25 @@ class ProxyService : VpnService() {
         }
     }
 
+    // Thread-local socket pool: each thread in dnsExecutor owns its own socket.
+    // This avoids the EBADF cascade that occurs when one thread closes a shared
+    // socket while other threads are mid-send/receive on it.
+    private val threadLocalSocket = object : ThreadLocal<DatagramSocket?>() {
+        override fun initialValue(): DatagramSocket? = null
+    }
+
+    private fun getThreadSocket(): DatagramSocket {
+        val existing = threadLocalSocket.get()
+        if (existing != null && !existing.isClosed) return existing
+        return DatagramSocket().also { s ->
+            s.soTimeout = 4000
+            threadLocalSocket.set(s)
+        }
+    }
+
     private fun handleDnsQuery(payload: ByteArray, proxyAddr: InetAddress, proxyPort: Int): DatagramPacket? {
-        var socket: DatagramSocket? = null
         return try {
-            socket = DatagramSocket()
-            socket.soTimeout = 4000
+            val socket = getThreadSocket()
             socket.send(DatagramPacket(payload, payload.size, proxyAddr, proxyPort))
             val recvBuf = ByteArray(4096)
             val recvPacket = DatagramPacket(recvBuf, recvBuf.size)
@@ -382,10 +505,43 @@ class ProxyService : VpnService() {
             recvPacket
         } catch (e: Exception) {
             Log.e(TAG, "DNS lookup failed: ${e.message}")
+            // Close and evict only this thread's socket — other threads are unaffected
+            try { threadLocalSocket.get()?.close() } catch (_: Exception) {}
+            threadLocalSocket.set(null)
             null
-        } finally {
-            socket?.close()
         }
+    }
+
+    /**
+     * Walk the IPv6 fixed header (40 bytes) and any extension headers to find
+     * the byte offset where the UDP header starts.  Returns -1 if the packet
+     * does not contain a UDP segment or is too short to be valid.
+     *
+     * Extension header next-header values that can precede UDP (17):
+     *   0  = Hop-by-Hop, 43 = Routing, 44 = Fragment, 60 = Destination Options
+     */
+    private fun findIpv6UdpOffset(data: ByteArray, length: Int): Int {
+        if (length < 40) return -1
+        val UDP = 17
+        val extensionHeaders = setOf(0, 43, 44, 60, 135, 139, 140)
+        var nextHeader = data[6].toInt() and 0xFF
+        var offset = 40 // skip fixed IPv6 header
+        while (offset < length) {
+            if (nextHeader == UDP) return offset
+            if (nextHeader !in extensionHeaders) return -1
+            if (nextHeader == 44) {
+                // Fragment header is exactly 8 bytes, no length field
+                if (offset + 8 > length) return -1
+                nextHeader = data[offset].toInt() and 0xFF
+                offset += 8
+            } else {
+                if (offset + 2 > length) return -1
+                nextHeader = data[offset].toInt() and 0xFF
+                val extLen = (data[offset + 1].toInt() and 0xFF + 1) * 8
+                offset += extLen
+            }
+        }
+        return -1
     }
 
     private fun constructIpv6Udp(request: ByteArray, payload: ByteArray, payloadLen: Int): ByteArray {
@@ -460,13 +616,19 @@ class ProxyService : VpnService() {
         // Swap Source and Destination IPs
         System.arraycopy(request, 16, response, 12, 4)
         System.arraycopy(request, 12, response, 16, 4)
-        
+        // Set a sensible TTL (64) — inherited value from request may be 0 after
+        // header copy+modification which causes some kernels to silently drop the packet.
+        response[8] = 64
+        // Protocol stays UDP (17), already copied from request header
         // Swap UDP ports: response source = request dest, response dest = request source
-        response[ihl] = request[ihl + 2]; response[ihl + 1] = request[ihl + 3]
-        response[ihl + 2] = request[ihl]; response[ihl + 3] = request[ihl + 1]
+        response[ihl]     = request[ihl + 2]; response[ihl + 1] = request[ihl + 3]
+        response[ihl + 2] = request[ihl];     response[ihl + 3] = request[ihl + 1]
         val udpLen = 8 + payloadLen
         response[ihl + 4] = (udpLen shr 8).toByte(); response[ihl + 5] = (udpLen and 0xFF).toByte()
+        // Zero UDP checksum (optional for IPv4; kernel will accept it)
+        response[ihl + 6] = 0; response[ihl + 7] = 0
         System.arraycopy(payload, 0, response, ihl + 8, payloadLen)
+        // Set total length and clear checksum field before recomputing
         response[2] = (totalLen shr 8).toByte(); response[3] = (totalLen and 0xFF).toByte()
         response[10] = 0; response[11] = 0
         var checksum: Long = 0
@@ -503,8 +665,10 @@ class ProxyService : VpnService() {
         isProxyRunning = false
         stopHeartbeat()
         stopProxy()
-        serviceScope.cancel() 
+        serviceScope.cancel()
         dnsExecutor.shutdown()
+        proxyReady = false
+        // Thread-local sockets are closed when dnsExecutor threads terminate
         try { vpnInterface?.close(); vpnInterface = null } catch (e: Exception) {}
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_REMOVE)
         else { @Suppress("DEPRECATION") stopForeground(true) }
