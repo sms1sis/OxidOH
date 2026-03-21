@@ -1,44 +1,110 @@
 #!/bin/bash
 set -e
 
-# 1. Point to your specific NDK version
-#    Replace with your actual NDK path, e.g., $HOME/Android/Sdk/ndk/25.1.8748175
-if [ -z "$ANDROID_NDK_HOME" ]; then export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/29.0.14206865; fi
+# ── NDK setup ─────────────────────────────────────────────────────────────────
+if [ -z "$ANDROID_NDK_HOME" ]; then
+    export ANDROID_NDK_HOME=$HOME/Android/Sdk/ndk/29.0.14206865
+fi
 
-# 2. Add the NDK toolchain to your PATH so Cargo can find the 'clang' tools
 TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
 export PATH=$TOOLCHAIN:$PATH
 
-# Define target - focusing ONLY on arm64-v8a (ARMv8-A)
 TARGET="aarch64-linux-android"
 
-# Optimization flags for ARMv8-A - MUST BE EXPORTED BEFORE CARGO
-export RUSTFLAGS="-C target-cpu=generic -C target-feature=+neon --cfg reqwest_unstable"
+# ── Argument parsing ──────────────────────────────────────────────────────────
+BUILD_MODE="release"
+CARGO_FLAGS="--release"
+EXTRA_FEATURES=""
 
-echo "Using NDK from: $ANDROID_NDK_HOME"
-echo "Building for ARMv8-A (arm64-v8a)..."
+while getopts "dh" opt; do
+  case $opt in
+    d)
+      BUILD_MODE="debug"
+      CARGO_FLAGS=""
+      echo "Building in DEBUG mode..."
+      ;;
+    h)
+      EXTRA_FEATURES="http3"
+      echo "Building with HTTP/3 support..."
+      ;;
+    \?)
+      echo "Usage: $0 [-d] [-h]   (-d = debug build, -h = include HTTP/3)" >&2
+      exit 1
+      ;;
+  esac
+done
 
-# Ensure cargo-ndk is installed
+# ── RUSTFLAGS ─────────────────────────────────────────────────────────────────
+# No target-cpu override — let LLVM use the safe ARMv8-A baseline implied by
+# the aarch64-linux-android triple.  Specifying a micro-arch (e.g. cortex-a55)
+# can emit instructions (RDMA, dotprod, etc.) that cause SIGILL on devices
+# whose CPU doesn't implement that specific core, even if they are arm64.
+# reqwest_unstable is only needed when the http3 feature is requested.
+# reqwest http3 requires a compile-time cfg flag in addition to the Cargo feature.
+# Unset RUSTFLAGS entirely for normal builds to avoid interfering with other tooling.
+if [[ "$EXTRA_FEATURES" == *"http3"* ]]; then
+    export RUSTFLAGS="--cfg reqwest_unstable"
+else
+    unset RUSTFLAGS
+fi
+
+# ── Tool checks ───────────────────────────────────────────────────────────────
+if ! rustup target list --installed | grep -q "$TARGET"; then
+    echo "Rust target $TARGET not found, adding..."
+    rustup target add "$TARGET"
+fi
+
 if ! command -v cargo-ndk &> /dev/null; then
     echo "cargo-ndk not found, installing..."
     cargo install cargo-ndk
 fi
 
+# ── Version sync ──────────────────────────────────────────────────────────────
+# Only update Cargo.toml if the version actually changed, to avoid dirtying git
+# on every build. Warns instead of silently no-op-ing if parsing fails.
+VERSION=$(grep 'versionName' android/app/build.gradle | head -1 | awk -F'"' '{print $2}')
+if [ -z "$VERSION" ]; then
+    echo "WARNING: could not parse versionName from build.gradle, keeping Cargo.toml version"
+else
+    CURRENT=$(grep '^version' Cargo.toml | head -1 | awk -F'"' '{print $2}')
+    if [ "$VERSION" != "$CURRENT" ]; then
+        sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+        echo "Version synced: $CURRENT → $VERSION"
+    fi
+fi
+
+# ── Lockfile ──────────────────────────────────────────────────────────────────
+# Regenerate Cargo.lock if it is missing or if Cargo.toml was just modified.
+# Commit Cargo.lock to git for reproducible builds; --locked can then be added
+# once the lockfile is stable.
+if [ ! -f Cargo.lock ]; then
+    echo "Cargo.lock not found, generating..."
+    cargo generate-lockfile
+fi
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+# The http3 Cargo feature (which activates reqwest/http3) must be passed here;
+# setting RUSTFLAGS alone is not sufficient.
+FEATURES="jni"
+[ -n "$EXTRA_FEATURES" ] && FEATURES="jni,$EXTRA_FEATURES"
+
+echo "NDK:      $ANDROID_NDK_HOME"
+echo "Target:   $TARGET [$BUILD_MODE]"
+echo "Features: $FEATURES"
 echo "--------------------------------------------------"
-echo "Building for $TARGET..."
 
-# Build with JNI feature
-# Use --package oxidoh to build only this crate
-cargo ndk --target "$TARGET" --platform 26 build --release --lib --features jni --package oxidoh
+cargo ndk --target "$TARGET" --platform 26 build $CARGO_FLAGS --lib --features "$FEATURES"
 
-echo "--------------------------------------------------"
-echo "Build complete! Collecting libraries..."
-
-# Copy to the Android project's jniLibs directory
-# This assumes an existing Android project structure like https_dns_proxy_rust
-OUTPUT_DIR="android/app/src/main/jniLibs" # Adjust this path if your Android project is elsewhere
+# ── Collect output ────────────────────────────────────────────────────────────
+SO_PATH="target/$TARGET/$BUILD_MODE/liboxidoh.so"
+OUTPUT_DIR="android/app/src/main/jniLibs"
 mkdir -p "$OUTPUT_DIR/arm64-v8a"
 
-cp target/$TARGET/release/liboxidoh.so "$OUTPUT_DIR/arm64-v8a/"
+if [ ! -s "$SO_PATH" ]; then
+    echo "ERROR: .so missing or empty at $SO_PATH" >&2
+    exit 1
+fi
 
-echo "All libraries collected in $OUTPUT_DIR/"
+cp "$SO_PATH" "$OUTPUT_DIR/arm64-v8a/"
+echo "--------------------------------------------------"
+echo "Done. $(du -h "$SO_PATH" | cut -f1) → $OUTPUT_DIR/arm64-v8a/"
