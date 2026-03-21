@@ -447,7 +447,7 @@ class MainActivity : ComponentActivity() {
                                 Spacer(Modifier.width(50.dp))
                             }
                         },
-                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                        colors = TopAppBarDefaults.topAppBarColors(
                             containerColor = MaterialTheme.colorScheme.surface)
                     )
                 },
