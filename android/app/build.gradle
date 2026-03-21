@@ -5,22 +5,22 @@ plugins {
 
 android {
     namespace = "io.github.sms1sis.oxidoh"
-    compileSdk 36
+    compileSdk = 36
 
     defaultConfig {
-        applicationId "io.github.sms1sis.oxidoh"
-        minSdk 23
-        targetSdk 36
-        versionCode 5
-        versionName "0.3.0"
+        applicationId = "io.github.sms1sis.oxidoh"
+        minSdk = 23
+        targetSdk = 36
+        versionCode = 6
+        versionName = "0.4.0"
 
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
         }
 
         ndk {
-            abiFilters "arm64-v8a"
+            abiFilters += ["arm64-v8a"]
         }
     }
 
@@ -32,25 +32,25 @@ android {
 
     signingConfigs {
         release {
-            storeFile file("release.jks")
-            storePassword System.getenv("KEYSTORE_PASSWORD")
-            keyAlias System.getenv("KEY_ALIAS")
-            keyPassword System.getenv("KEY_PASSWORD")
+            storeFile = file("release.jks")
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
         }
     }
 
     buildTypes {
         release {
-            minifyEnabled true
-            signingConfig signingConfigs.release
+            minifyEnabled = true
+            signingConfig = signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             matchingFallbacks = ['release']
         }
     }
     
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     buildFeatures {
