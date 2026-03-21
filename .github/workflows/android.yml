@@ -13,63 +13,56 @@ on:
 
 jobs:
   build:
+    name: Build Check
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
-        cache: gradle
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: aarch64-linux-android
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
 
-    - name: Cache Rust registry & build artifacts
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry/index
-          ~/.cargo/registry/cache
-          ~/.cargo/git/db
-          target/aarch64-linux-android
-        key: rust-android-${{ hashFiles('Cargo.lock') }}
-        restore-keys: rust-android-
+      - name: Cache Rust registry & build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/aarch64-linux-android
+          key: rust-android-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-android-
 
-    - name: Install cargo-ndk
-      run: |
-        # Use cached binary if available, otherwise install
-        if ! command -v cargo-ndk &>/dev/null; then
-          cargo install cargo-ndk --locked
-        fi
+      - name: Install cargo-ndk
+        run: |
+          if ! command -v cargo-ndk &>/dev/null; then
+            cargo install cargo-ndk --locked
+          fi
 
-    - name: Set up Android NDK
-      uses: nttld/setup-ndk@v1
-      with:
-        ndk-version: r29
+      - name: Set up Android NDK r29
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
 
-    - name: Build Rust Core
-      run: |
-        export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT
-        chmod +x build_android.sh
-        ./build_android.sh
+      - name: Build Rust core
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT
+          chmod +x build_android.sh
+          ./build_android.sh
 
-    - name: Build Android App
-      run: |
-        cd android
-        chmod +x gradlew
-        ./gradlew assembleDebug
-
-    - name: Upload APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: OxidOH-Debug-APK
-        path: android/app/build/outputs/apk/debug/app-debug.apk
-        retention-days: 30
+      - name: Build Android app (debug)
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
