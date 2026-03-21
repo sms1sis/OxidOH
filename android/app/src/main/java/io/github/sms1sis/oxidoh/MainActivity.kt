@@ -318,7 +318,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        val onToggle = {
+        val onToggle: () -> Unit = {
             if (isRunning) {
                 val stopIntent = Intent(context, ProxyService::class.java).apply { action = "STOP" }
                 context.startService(stopIntent)
@@ -327,8 +327,12 @@ class MainActivity : ComponentActivity() {
                 val vpnIntent = VpnService.prepare(context)
                 if (vpnIntent != null) vpnPermissionLauncher.launch(vpnIntent)
                 else {
-                    startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
-                    isRunning = true
+                    try {
+                        startProxyService(resolverUrl, listenPort, bootstrapDns, allowIpv6, cacheTtl, tcpLimit, pollInterval, useHttp3, heartbeatEnabled, heartbeatDomain, heartbeatInterval)
+                        isRunning = true
+                    } catch (e: Exception) {
+                        android.util.Log.e("OxidOH", "Failed to start proxy service", e)
+                    }
                 }
             }
         }

@@ -11,16 +11,23 @@ class ProxyTileService : TileService() {
         updateTile()
     }
 
+    override fun onStopListening() {
+        super.onStopListening()
+    }
+
     override fun onClick() {
         super.onClick()
+        // Optimistically update the tile to UNAVAILABLE while we wait,
+        // so the user gets immediate visual feedback.
+        qsTile?.let { tile ->
+            tile.state = Tile.STATE_UNAVAILABLE
+            tile.updateTile()
+        }
+
         if (ProxyService.isProxyRunning) {
-            val intent = Intent(this, ProxyService::class.java).apply {
-                action = "STOP"
-            }
+            val intent = Intent(this, ProxyService::class.java).apply { action = "STOP" }
             startService(intent)
         } else {
-            // We use default values for the Tile start. 
-            // A more advanced version could load user preferences.
             val intent = Intent(this, ProxyService::class.java)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 startForegroundService(intent)
@@ -28,23 +35,19 @@ class ProxyTileService : TileService() {
                 startService(intent)
             }
         }
-        // Small delay to allow service to update its state
-        android.os.Handler(mainLooper).postDelayed({
-            updateTile()
-        }, 500)
+        // Poll state twice: once quickly for fast stops, once slower for slow starts
+        android.os.Handler(mainLooper).postDelayed({ updateTile() }, 400)
+        android.os.Handler(mainLooper).postDelayed({ updateTile() }, 1500)
     }
 
     private fun updateTile() {
         val tile = qsTile ?: return
         val isRunning = ProxyService.isProxyRunning
-        
         tile.state = if (isRunning) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.label = getString(R.string.tile_label)
-        
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            tile.subtitle = if (isRunning) "Active" else "Inactive"
+            tile.subtitle = if (isRunning) getString(R.string.tile_active) else getString(R.string.tile_inactive)
         }
-        
         tile.updateTile()
     }
 }

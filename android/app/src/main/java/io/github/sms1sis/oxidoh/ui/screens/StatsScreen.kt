@@ -37,6 +37,8 @@ fun StatsScreen(stats: IntArray) {
     val cacheHits = stats.getOrElse(5) { 0 }
     val errors = stats.getOrElse(6) { 0 }
     val avgLat = stats.getOrElse(7) { 0 }
+    val cacheMisses = stats.getOrElse(8) { 0 }
+    val cacheSize = stats.getOrElse(9) { 0 }
 
     val successRate = if (total > 0) {
         ((total - errors).toFloat() / total.toFloat() * 100).toInt().coerceIn(0, 100)
@@ -199,7 +201,54 @@ fun StatsScreen(stats: IntArray) {
                 isError = errors > 0
             )
         }
-        
+        Spacer(Modifier.height(24.dp))
+
+        // Cache Hit Rate card
+        val hitTotal = cacheHits + cacheMisses
+        val hitRate = if (hitTotal > 0) cacheHits.toFloat() / hitTotal.toFloat() else null
+        val hitRatePct = hitRate?.let { (it * 100).toInt() }
+        val hitColor = when {
+            hitRatePct == null -> MaterialTheme.colorScheme.outline
+            hitRatePct >= 60   -> androidx.compose.ui.graphics.Color(0xFF4CAF50)
+            hitRatePct >= 30   -> androidx.compose.ui.graphics.Color(0xFFFFC107)
+            else               -> MaterialTheme.colorScheme.error
+        }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+            )
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(stringResource(R.string.cache_hit_rate), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (hitRatePct != null) "$hitRatePct%" else "--%",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = hitColor
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { hitRate ?: 0f },
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)),
+                    color = hitColor,
+                    trackColor = hitColor.copy(alpha = 0.15f)
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("${stringResource(R.string.cache_hits)}: $cacheHits", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                    Text("${stringResource(R.string.cache_misses)}: $cacheMisses", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                    Text("${stringResource(R.string.cache_size)}: $cacheSize", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                }
+            }
+        }
+
         Spacer(Modifier.height(32.dp))
     }
 }
