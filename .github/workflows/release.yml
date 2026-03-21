@@ -2,9 +2,46 @@ name: Release Build
 
 on:
   workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "Release notes (optional — leave blank to auto-generate from commits)"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
+  # ── 1. Security audit — fail fast before spending build time ────────────────
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo-audit binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}
+
+      - name: Install cargo-audit
+        run: |
+          if ! command -v cargo-audit &>/dev/null; then
+            cargo install cargo-audit --locked
+          fi
+
+      - name: Run security audit
+        run: cargo audit
+
+  # ── 2. Build & Release ───────────────────────────────────────────────────────
   build:
+    name: Build & Release
+    needs: audit
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -12,75 +49,169 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history needed for commit-based release notes
 
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
-        cache: gradle
+      # ── Java ──────────────────────────────────────────────────────────────────
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: aarch64-linux-android
+      # ── Rust ──────────────────────────────────────────────────────────────────
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
 
-    - name: Install cargo-ndk
-      run: cargo install cargo-ndk
+      - name: Cache Rust registry & build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/aarch64-linux-android/release
+          key: rust-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-release-
 
-    - name: Set up Android NDK
-      uses: nttld/setup-ndk@v1
-      with:
-        ndk-version: r27c
-        add-to-path: true
+      - name: Install cargo-ndk
+        run: |
+          if ! command -v cargo-ndk &>/dev/null; then
+            cargo install cargo-ndk --locked
+          fi
 
-    - name: Build Rust Core
-      run: |
-        export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT
-        chmod +x build_android.sh
-        ./build_android.sh
-      env:
-        RUSTFLAGS: "-C target-cpu=generic -C target-feature=+neon --cfg reqwest_unstable"
+      # ── NDK ───────────────────────────────────────────────────────────────────
+      - name: Set up Android NDK r29
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          add-to-path: true
 
-    - name: Decode Keystore
-      run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.jks
+      # ── Build Rust .so ────────────────────────────────────────────────────────
+      - name: Build Rust core
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT
+          chmod +x build_android.sh
+          ./build_android.sh
 
-    - name: Build Android App
-      run: |
-        cd android
-        chmod +x gradlew
-        ./gradlew clean assembleRelease
-      env:
-        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      # ── Verify .so ────────────────────────────────────────────────────────────
+      - name: Verify native library
+        run: |
+          SO=android/app/src/main/jniLibs/arm64-v8a/liboxidoh.so
+          if [ ! -s "$SO" ]; then
+            echo "ERROR: $SO is missing or empty" >&2; exit 1
+          fi
+          echo "liboxidoh.so: $(du -h "$SO" | cut -f1)"
+          file "$SO" | grep -q "ELF 64-bit.*aarch64" \
+            || { echo "ERROR: unexpected file type: $(file "$SO")" >&2; exit 1; }
 
-    - name: Get Version Name
-      id: version
-      run: |
-        VERSION_NAME=$(grep "versionName" android/app/build.gradle | head -n 1 | awk -F'"' '{print $2}')
-        echo "version=$VERSION_NAME" >> $GITHUB_OUTPUT
+      # ── Keystore ──────────────────────────────────────────────────────────────
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.jks
 
-    - name: Get current date
-      id: date
-      run: echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+      # ── Build APK ─────────────────────────────────────────────────────────────
+      - name: Build release APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew clean assembleRelease --no-daemon
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
 
-    - name: Rename APK
-      run: |
-        mv android/app/build/outputs/apk/release/app-release.apk OxidOH-ODoH-armv8a-v${{ steps.version.outputs.version }}-${{ steps.date.outputs.date }}.apk
+      # ── Verify APK signature ──────────────────────────────────────────────────
+      - name: Verify APK signature
+        run: |
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK missing or empty" >&2; exit 1
+          fi
+          BUILD_TOOLS=$(ls "$ANDROID_HOME/build-tools/" | sort -V | tail -1)
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify --verbose "$APK" \
+            && echo "APK signature OK" \
+            || { echo "ERROR: APK signature verification failed" >&2; exit 1; }
 
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: OxidOH-Release-APK
-        path: OxidOH-ODoH-armv8a-v${{ steps.version.outputs.version }}-${{ steps.date.outputs.date }}.apk
+      # ── Version & naming ──────────────────────────────────────────────────────
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep 'versionName' android/app/build.gradle | head -1 | awk -F'"' '{print $2}')
+          CODE=$(grep 'versionCode' android/app/build.gradle | head -1 | awk '{print $NF}')
+          echo "name=$VERSION" >> $GITHUB_OUTPUT
+          echo "code=$CODE"    >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION (code $CODE)"
 
-    - name: Create Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: v${{ steps.version.outputs.version }}
-        name: Release v${{ steps.version.outputs.version }}
-        files: OxidOH-ODoH-armv8a-v${{ steps.version.outputs.version }}-${{ steps.date.outputs.date }}.apk
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check tag is new
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" &>/dev/null; then
+            echo "ERROR: tag ${{ steps.version.outputs.tag }} already exists — bump versionName in build.gradle" >&2
+            exit 1
+          fi
+
+      - name: Rename APK
+        id: apk
+        run: |
+          NAME="OxidOH-ODoH-armv8a-${{ steps.version.outputs.tag }}.apk"
+          mv android/app/build/outputs/apk/release/app-release.apk "$NAME"
+          echo "filename=$NAME" >> $GITHUB_OUTPUT
+          echo "APK: $NAME  $(du -h "$NAME" | cut -f1)"
+
+      # ── Release notes ─────────────────────────────────────────────────────────
+      - name: Generate release notes
+        id: notes
+        run: |
+          if [ -n "${{ inputs.release_notes }}" ]; then
+            printf '%s' "${{ inputs.release_notes }}" > release_notes.md
+          else
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -n "$LAST_TAG" ]; then
+              git log "${LAST_TAG}..HEAD" --pretty=format:"- %s" --no-merges > release_notes.md
+            else
+              git log --pretty=format:"- %s" --no-merges -20 > release_notes.md
+            fi
+          fi
+          echo "--- release notes ---"
+          cat release_notes.md
+
+      # ── Checksum ──────────────────────────────────────────────────────────────
+      - name: Generate SHA-256 checksum
+        run: |
+          sha256sum "${{ steps.apk.outputs.filename }}" \
+            > "${{ steps.apk.outputs.filename }}.sha256"
+          cat "${{ steps.apk.outputs.filename }}.sha256"
+
+      # ── Upload artifact (kept even if release step fails) ─────────────────────
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OxidOH-Release-${{ steps.version.outputs.tag }}
+          path: |
+            ${{ steps.apk.outputs.filename }}
+            ${{ steps.apk.outputs.filename }}.sha256
+          retention-days: 90
+
+      # ── GitHub Release ────────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:              ${{ steps.version.outputs.tag }}
+          name:                  OxidOH ${{ steps.version.outputs.tag }}
+          body_path:             release_notes.md
+          prerelease:            ${{ inputs.prerelease }}
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.apk.outputs.filename }}
+            ${{ steps.apk.outputs.filename }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Cleanup ───────────────────────────────────────────────────────────────
+      - name: Remove keystore
+        if: always()
+        run: rm -f android/app/release.jks

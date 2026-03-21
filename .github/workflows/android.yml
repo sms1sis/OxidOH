@@ -2,6 +2,14 @@ name: Android CI
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'android/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build_android.sh'
 
 jobs:
   build:
@@ -24,13 +32,28 @@ jobs:
       with:
         targets: aarch64-linux-android
 
+    - name: Cache Rust registry & build artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target/aarch64-linux-android
+        key: rust-android-${{ hashFiles('Cargo.lock') }}
+        restore-keys: rust-android-
+
     - name: Install cargo-ndk
-      run: cargo install cargo-ndk
+      run: |
+        # Use cached binary if available, otherwise install
+        if ! command -v cargo-ndk &>/dev/null; then
+          cargo install cargo-ndk --locked
+        fi
 
     - name: Set up Android NDK
       uses: nttld/setup-ndk@v1
       with:
-        ndk-version: r27c
+        ndk-version: r29
 
     - name: Build Rust Core
       run: |
@@ -49,3 +72,4 @@ jobs:
       with:
         name: OxidOH-Debug-APK
         path: android/app/build/outputs/apk/debug/app-debug.apk
+        retention-days: 30
