@@ -4,25 +4,39 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    
-    <!-- Outer Hexagonal Shield Glow -->
-    <path
-        android:fillColor="#D0BCFF"
-        android:alpha="0.15"
-        android:pathData="M54,22L82,38V70L54,86L26,70V38L54,22Z" />
 
-    <!-- Main Hexagonal Shield -->
+    <!-- Outer Decorative HUD Brackets -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,28L76,40V68L54,80L32,68V40L54,28Z" />
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="2"
+        android:strokeLineCap="square"
+        android:alpha="0.6"
+        android:pathData="M30,35v-5h5 M73,30h5v5 M78,73v5h-5 M35,78h-5v-5" />
 
-    <!-- Inner Core (Representing the Oblivious DNS Query) -->
+    <!-- Main Tactical Shield (Hexagon) -->
     <path
-        android:fillColor="#6750A4"
-        android:pathData="M54,42L62,47V57L54,62L46,57V47L54,42Z" />
-        
-    <!-- Privacy Horizontal Bar (The "Oblivious" mask) -->
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="1.5"
+        android:fillColor="#00E5FF"
+        android:fillAlpha="0.1"
+        android:pathData="M54,26L80,41V67L54,82L28,67V41L54,26Z" />
+
+    <!-- Shield Core Outline -->
     <path
-        android:fillColor="#6750A4"
-        android:pathData="M40,51h28v2h-28z" />
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="3"
+        android:pathData="M54,38C45.16,38 38,45.16 38,54C38,62.84 45.16,70 54,70C62.84,70 70,62.84 70,54C70,45.16 62.84,38 54,38ZM54,64C48.48,64 44,59.52 44,54C44,48.48 48.48,44 54,44C59.52,44 64,48.48 64,54C64,59.52 59.52,64 54,64Z" />
+
+    <!-- Internal Status Core (Neon Green) -->
+    <path
+        android:fillColor="#00FF9C"
+        android:pathData="M54,48c-3.31,0-6,2.69-6,6s2.69,6,6,6s6-2.69,6-6S57.31,48,54,48z" />
+
+    <!-- Scanning HUD Line -->
+    <path
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="1"
+        android:alpha="0.3"
+        android:pathData="M30,54h48" />
+
 </vector>
