@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::net::{SocketAddr, IpAddr};
@@ -18,7 +19,6 @@ use std::io::Cursor;
 #[cfg(feature = "jni")]
 use jni::JavaVM;
 #[cfg(feature = "jni")]
-use jni::objects::JClass;
 use hickory_resolver::proto::op::Message;
 
 pub struct Stats {
@@ -90,17 +90,19 @@ static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock:
                     let jvm_guard   = JVM.read().ok()?;
                     let jvm   = jvm_guard.as_ref()?;
                     let class_guard = PROXY_SERVICE_CLASS.read().ok()?;
-                    let class: &jni::objects::GlobalRef = class_guard.as_ref()?;
-                    let mut env = jvm.attach_current_thread().ok()?;
-                    let level_j = env.new_string(&level).ok()?;
-                    let tag_j   = env.new_string("OxidOH-Native").ok()?;
-                    let msg_j   = env.new_string(&msg).ok()?;
-                    env.call_static_method(
-                        class,
-                        "nativeLog",
-                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                        &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
-                    ).ok()?;
+                    let class = class_guard.as_ref()?;
+                    jvm.attach_current_thread(|env| {
+                        let level_j = env.new_string(&level)?;
+                        let tag_j   = env.new_string("OxidOH-Native")?;
+                        let msg_j   = env.new_string(&msg)?;
+                        env.call_static_method(
+                            class,
+                            jni::jni_str!("nativeLog"),
+                            jni::jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                            &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
+                        )?;
+                        Ok::<(), jni::errors::Error>(())
+                    }).ok();
                     Some(())
                 })();
             }
@@ -268,6 +270,7 @@ impl DynamicResolver {
 }
 
 use reqwest::dns::{Resolve, Resolving, Name, Addrs};
+use rand::SeedableRng;
 impl Resolve for DynamicResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let name_str = name.as_str().to_string();
@@ -293,7 +296,7 @@ static ODOH_CONFIG: LazyLock<std::sync::RwLock<Option<ObliviousDoHConfig>>> = La
 #[cfg(feature = "jni")]
 static JVM: LazyLock<std::sync::RwLock<Option<JavaVM>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 #[cfg(feature = "jni")]
-static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::GlobalRef>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+static PROXY_SERVICE_CLASS: LazyLock<std::sync::RwLock<Option<jni::objects::Global<jni::objects::JClass<'static>>>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 pub async fn run_proxy(config: Config, stats: Arc<Stats>, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> Result<()> {
     native_log("INFO", &format!("run_proxy entered, binding {}:{}", config.listen_addr, config.listen_port));
@@ -786,7 +789,7 @@ async fn handle_query(
         // ThreadRng contains Rc<> and is !Send — it cannot live across an await
         // point inside tokio::spawn. rand::rng() is the rand 0.9 name for thread_rng().
         let (req_bytes, client_secret) = {
-            let mut rng = rand::rng();
+            let mut rng = rand::rngs::StdRng::from_os_rng();
             let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?;
             (compose(&encrypted_query_msg)?.freeze(), client_secret)
         }; // rng dropped here, before any .await 
@@ -895,24 +898,23 @@ async fn handle_query(
                 if should_cache && dns_resp.len() > 2 {
                     let mut ttl = cache_ttl_default;
                     if let Ok(msg) = Message::from_vec(&dns_resp) {
-                        let rcode = msg.response_code();
+                        let rcode = msg.metadata.response_code;
                         let is_negative = rcode == hickory_resolver::proto::op::ResponseCode::NXDomain
                             || (rcode == hickory_resolver::proto::op::ResponseCode::NoError
-                                && msg.answers().is_empty());
+                                && msg.answers.is_empty());
                         if is_negative {
                             // Use SOA minimum TTL for negative caching (RFC 2308)
-                            ttl = msg.name_servers().iter()
+                            ttl = msg.authorities.iter()
                                 .filter_map(|rr| {
-                                    if let hickory_resolver::proto::rr::RData::SOA(soa) = rr.data() {
-                                        Some(soa.minimum() as u64)
+                                    if let hickory_resolver::proto::rr::RData::SOA(soa) = &rr.data {
+                                        Some(soa.minimum as u64)
                                     } else { None }
                                 })
                                 .next()
                                 .unwrap_or(60)
                                 .clamp(30, 300);
                         } else {
-                            ttl = msg.answers().iter().map(|a| a.ttl()).min()
-                                .unwrap_or(cache_ttl_default as u32) as u64;
+                            ttl = msg.answers.iter().map(|a| a.ttl as u64).min().unwrap_or(cache_ttl_default as u64);
                             ttl = ttl.clamp(10, 3600);
                         }
                     }
@@ -1049,7 +1051,7 @@ async fn send_response(
 
 fn extract_domain(data: &[u8]) -> String {
     if let Ok(msg) = Message::from_vec(data) {
-        if let Some(query) = msg.queries().first() {
+        if let Some(query) = msg.queries.first() {
             let name = query.name().to_string();
             return if name.ends_with('.') && name.len() > 1 {
                 name[..name.len() - 1].to_string()
@@ -1085,27 +1087,23 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, 
     }
 
     use hickory_resolver::config::{ResolverConfig, NameServerConfig, ResolverOpts, LookupIpStrategy};
-    use hickory_resolver::proto::xfer::Protocol;
-    use hickory_resolver::TokioResolver;
-    use hickory_resolver::name_server::TokioConnectionProvider;
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
+    
 
-    let servers: Vec<SocketAddr> = bootstrap_dns
+    let servers: Vec<IpAddr> = bootstrap_dns
         .split(',')
         .map(|s| {
             let s = s.trim();
             if let Ok(ip) = s.parse::<IpAddr>() {
-                SocketAddr::new(ip, 53)
+                ip
             } else {
-                s.parse().expect("Invalid bootstrap address")
+                s.parse::<SocketAddr>().expect("Invalid bootstrap address").ip()
             }
         })
         .collect();
 
-    let mut config = ResolverConfig::new();
-    for s in servers {
-        config.add_name_server(NameServerConfig::new(s, Protocol::Udp));
-        config.add_name_server(NameServerConfig::new(s, Protocol::Tcp));
-    }
+    let name_servers = servers.into_iter().map(NameServerConfig::udp_and_tcp).collect();
+    let config = ResolverConfig::from_parts(None, vec![], name_servers);
 
     let mut opts = ResolverOpts::default();
     opts.ip_strategy = if allow_ipv6 {
@@ -1114,9 +1112,10 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, 
         LookupIpStrategy::Ipv4Only
     };
 
-    let resolver = TokioResolver::builder_with_config(config, TokioConnectionProvider::default())
+    let resolver = hickory_resolver::Resolver::builder_with_config(config, TokioRuntimeProvider::default())
         .with_options(opts)
-        .build();
+        .build()
+        .expect("Failed to build resolver");
     
     native_log("DEBUG", &format!("Resolving {} using bootstrap...", domain));
     let ips = match resolver.lookup_ip(domain).await {
@@ -1127,13 +1126,19 @@ async fn resolve_bootstrap(domain: &str, bootstrap_dns: &str, allow_ipv6: bool, 
             opts4.ip_strategy = LookupIpStrategy::Ipv4Only;
             
             // Try Cloudflare AND Google as fallbacks
-            let mut fallback_config = ResolverConfig::cloudflare();
-            fallback_config.add_name_server(NameServerConfig::new("8.8.8.8:53".parse()?, Protocol::Udp));
-            fallback_config.add_name_server(NameServerConfig::new("8.8.4.4:53".parse()?, Protocol::Udp));
+                         let mut fallback_config = ResolverConfig::udp_and_tcp(&hickory_resolver::config::CLOUDFLARE);
+            let extra_servers = vec![
+                NameServerConfig::udp_and_tcp("8.8.8.8".parse().unwrap()),
+                NameServerConfig::udp_and_tcp("8.8.4.4".parse().unwrap())
+            ];
+            for ns in extra_servers {
+                fallback_config.add_name_server(ns);
+            }
 
-            let resolver4 = TokioResolver::builder_with_config(fallback_config, TokioConnectionProvider::default())
+            let resolver4 = hickory_resolver::Resolver::builder_with_config(fallback_config, TokioRuntimeProvider::default())
                 .with_options(opts4)
-                .build();
+                .build()
+                .expect("Failed to build fallback resolver");
             resolver4.lookup_ip(domain).await.context("Failed to resolve DoH provider (IPv4 retry)")?
         }
     };
@@ -1191,8 +1196,7 @@ fn extract_urls(input: &str) -> Vec<String> {
 #[cfg(feature = "jni")]
 pub mod jni_api {
     use super::*;
-    use jni::JNIEnv;
-    use jni::objects::{JObject, JString};
+    use jni::objects::{JClass, JObject, JString};
     use jni::sys::jint;
     use tokio::runtime::Runtime;
     use tokio_util::sync::CancellationToken;
@@ -1201,11 +1205,12 @@ pub mod jni_api {
     static CANCELLATION_TOKEN: LazyLock<Mutex<Option<CancellationToken>>> = LazyLock::new(|| Mutex::new(None));
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_initLogger(
-        mut env: JNIEnv,
-        _class: JClass,
-        _context: JObject,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_initLogger<'local>(
+        mut unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
+        _context: JObject<'local>,
     ) {
+         unowned_env.with_env(|env| {
          let filter = if cfg!(debug_assertions) {
              log::LevelFilter::Debug
          } else {
@@ -1224,7 +1229,7 @@ pub mod jni_api {
              }
          }
 
-         if let Ok(class) = env.find_class("io/github/sms1sis/oxidoh/ProxyService") {
+         if let Ok(class) = env.find_class(jni::strings::JNIString::from("io/github/sms1sis/oxidoh/ProxyService")) {
              if let Ok(global_ref) = env.new_global_ref(class) {
                  if let Ok(mut w) = PROXY_SERVICE_CLASS.write() {
                      *w = Some(global_ref);
@@ -1233,25 +1238,28 @@ pub mod jni_api {
          }
 
          #[cfg(target_os = "android")]
-         rustls_platform_verifier::android::init_hosted(&mut env, _context).ok();
+         rustls_platform_verifier::android::init_with_env(env, _context).ok();
          native_log("INFO", "Logger, JVM and Global Class Ref initialized");
+         Ok::<(), jni::errors::Error>(())
+         }).resolve::<jni::errors::LogErrorAndDefault>();
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_startProxy(
-        mut env: JNIEnv,
-        _class: JClass,
-        listen_addr: JString,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_startProxy<'local>(
+        mut unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
+        listen_addr: JString<'local>,
         listen_port: jint,
-        resolver_url: JString,
-        bootstrap_dns: JString,
+        resolver_url: JString<'local>,
+        bootstrap_dns: JString<'local>,
         allow_ipv6: jni::sys::jboolean,
         cache_ttl: jni::sys::jlong,
         tcp_limit: jint,
         poll_interval: jni::sys::jlong,
         use_http3: jni::sys::jboolean,
-        exclude_domain: JString,
+        exclude_domain: JString<'local>,
     ) -> jint {
+        unowned_env.with_env(|env| {
         let listen_addr: String = env.get_string(&listen_addr).unwrap().into();
         let resolver_url_input: String = env.get_string(&resolver_url).unwrap().into();
         let bootstrap_dns: String = env.get_string(&bootstrap_dns).unwrap().into();
@@ -1260,7 +1268,7 @@ pub mod jni_api {
         let urls = extract_urls(&resolver_url_input);
         if urls.is_empty() {
             native_log("ERROR", "No valid URLs found in resolver input");
-            return -1;
+            return Ok(-1);
         }
 
         let odoh_target_url = urls[0].clone();
@@ -1279,14 +1287,14 @@ pub mod jni_api {
             odoh_target_url,
             odoh_proxy_url,
             bootstrap_dns,
-            allow_ipv6: allow_ipv6 != 0,
+            allow_ipv6: allow_ipv6 as u8 != 0,
             tcp_client_limit: tcp_limit as usize,
             polling_interval: poll_interval as u64,
             force_ipv4: false,
             proxy_server: None,
             source_addr: None,
             http11: false,
-            http3: use_http3 != 0,
+            http3: use_http3 as u8 != 0,
             max_idle_time: 120,
             conn_loss_time: 10,
             ca_path: None,
@@ -1325,38 +1333,45 @@ pub mod jni_api {
         
         native_log("INFO", "Proxy task spawned");
 
-        0
+        Ok::<jint, jni::errors::Error>(0)
+        }).resolve::<jni::errors::ThrowRuntimeExAndDefault>()
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getLatency(
-        _env: JNIEnv,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getLatency<'local>(
+        _unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) -> jint {
         LAST_LATENCY.load(Ordering::Relaxed) as jint
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getLogs(
-        mut env: JNIEnv,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getLogs<'local>(
+        mut unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) -> jni::sys::jobjectArray {
+        match unowned_env.with_env(|env| {
          let logs = QUERY_LOGS.lock().unwrap();
-         let cls = env.find_class("java/lang/String").unwrap();
+         let cls = env.find_class(jni::strings::JNIString::from("java/lang/String")).unwrap();
          let initial = env.new_string("").unwrap();
          let array = env.new_object_array(logs.len() as jni::sys::jsize, cls, &initial).unwrap();
          for (i, log) in logs.iter().enumerate() {
              let s = env.new_string(log).unwrap();
-             env.set_object_array_element(&array, i as jni::sys::jsize, &s).unwrap();
+             env.set_object_array_element(&array, i, &s).unwrap();
          }
-         array.into_raw()
+         Ok::<jni::sys::jobjectArray, jni::errors::Error>(array.into_raw())
+        }).into_outcome() {
+            jni::Outcome::Ok(v) => v,
+            _ => std::ptr::null_mut(),
+        }
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getStats(
-        env: JNIEnv,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_getStats<'local>(
+        mut unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) -> jni::sys::jintArray {
+        match unowned_env.with_env(|env| {
         let stats_opt = GLOBAL_STATS.read().ok().and_then(|g| g.clone());
         let cache_size = GLOBAL_CACHE.read().ok()
             .and_then(|g| g.as_ref().map(|c| c.len()))
@@ -1380,13 +1395,17 @@ pub mod jni_api {
 
         let array = env.new_int_array(10).unwrap();
         env.set_int_array_region(&array, 0, &values).unwrap();
-        array.into_raw()
+        Ok::<jni::sys::jintArray, jni::errors::Error>(array.into_raw())
+        }).into_outcome() {
+            jni::Outcome::Ok(v) => v,
+            _ => std::ptr::null_mut(),
+        }
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearStats(
-        _env: JNIEnv,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearStats<'local>(
+        _unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) {
         if let Some(stats) = GLOBAL_STATS.read().ok().and_then(|g| g.clone()) {
             stats.queries_udp.store(0, Ordering::Relaxed);
@@ -1403,9 +1422,9 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_stopProxy(
-        _env: JNIEnv,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_stopProxy<'local>(
+        _unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) {
         let mut lock = CANCELLATION_TOKEN.lock().unwrap();
         if let Some(token) = lock.take() {
@@ -1416,9 +1435,9 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearCache(
-        _env: JNIEnv,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearCache<'local>(
+        _unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) {
         if let Ok(guard) = GLOBAL_CACHE.read() {
             if let Some(cache) = guard.as_ref() {
@@ -1431,9 +1450,9 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearLogs(
-        _env: JNIEnv,
-        _class: JClass,
+    pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_clearLogs<'local>(
+        _unowned_env: jni::EnvUnowned<'local>,
+        _class: JClass<'local>,
     ) {
         let mut logs = QUERY_LOGS.lock().unwrap();
         logs.clear();
