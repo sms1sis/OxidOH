@@ -44,7 +44,9 @@ fun LogScreen(logs: Array<String>) {
     val onSurfaceColor = MaterialTheme.colorScheme.onSurface
     val errorColor = MaterialTheme.colorScheme.error
 
-    LaunchedEffect(logs.size) {
+    // Scroll to bottom whenever the newest entry changes — this fires on both
+    // size growth AND entry rotation (when the 50-cap rolls over old entries).
+    LaunchedEffect(logs.lastOrNull()) {
         if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
     }
 
@@ -66,6 +68,7 @@ fun LogScreen(logs: Array<String>) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 HudIconButton(Icons.Default.DeleteOutline, errorColor) {
                     ProxyService.clearLogs()
+                    scope.launch { listState.scrollToItem(0) }
                     android.widget.Toast.makeText(context,
                         context.getString(R.string.logs_cleared), android.widget.Toast.LENGTH_SHORT).show()
                 }

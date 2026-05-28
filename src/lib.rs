@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::net::{SocketAddr, IpAddr};
@@ -38,77 +37,88 @@ struct LogMessage {
     status: String,
 }
 
-static QUERY_LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(50)));
-static LOG_SENDER: LazyLock<mpsc::UnboundedSender<LogMessage>> = LazyLock::new(|| {
-    let (tx, mut rx) = mpsc::unbounded_channel::<LogMessage>();
-    // Use a plain OS thread (mirroring NATIVE_LOG_SENDER) so this is safe to
-    // initialise before the Tokio runtime exists, e.g. during static init or
-    // early in main() before #[tokio::main] sets up the executor.
+static QUERY_LOGS: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::with_capacity(200)));
+enum NativeLog {
+    Message { level: String, msg: String },
+    Shutdown,
+}
+
+// Combined log worker: one OS thread, one Tokio runtime, two channel receivers.
+// Replaces the previous two separate threads/runtimes.
+struct LogWorkerSenders {
+    query_tx: mpsc::UnboundedSender<LogMessage>,
+    native_tx: mpsc::UnboundedSender<NativeLog>,
+}
+
+static LOG_WORKER: LazyLock<LogWorkerSenders> = LazyLock::new(|| {
+    let (query_tx, mut query_rx) = mpsc::unbounded_channel::<LogMessage>();
+    let (native_tx, mut native_rx) = mpsc::unbounded_channel::<NativeLog>();
+
+    // A single OS thread hosts both receivers on one current-thread runtime.
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("log worker runtime");
         rt.block_on(async move {
-            while let Some(msg) = rx.recv().await {
-                let mut logs = QUERY_LOGS.lock().unwrap();
-                if logs.len() >= 50 {
-                    logs.pop_front();
+            loop {
+                tokio::select! {
+                    // ── query log branch ─────────────────────────────────────
+                    msg = query_rx.recv() => {
+                        match msg {
+                            Some(msg) => {
+                                let mut logs = QUERY_LOGS.lock().unwrap();
+                                if logs.len() >= 200 { logs.pop_front(); }
+                                let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                                logs.push_back(format!("[{}] {} -> {}", ts, msg.domain, msg.status));
+                            }
+                            None => break,
+                        }
+                    }
+                    // ── native log branch ────────────────────────────────────
+                    entry = native_rx.recv() => {
+                        match entry {
+                            Some(NativeLog::Shutdown) | None => break,
+                            Some(NativeLog::Message { level, msg }) => {
+                                match level.as_str() {
+                                    "ERROR" => log::error!(target: "OxidOH-Native", "{}", msg),
+                                    "WARN"  => log::warn!(target: "OxidOH-Native", "{}", msg),
+                                    "INFO"  => log::info!(target: "OxidOH-Native", "{}", msg),
+                                    _       => log::debug!(target: "OxidOH-Native", "{}", msg),
+                                }
+                                // Forward to Kotlin via JNI.
+                                // We use a thread-local flag so attach_current_thread is
+                                // called only once per worker-thread lifetime; subsequent
+                                // calls reuse the already-attached env via the callback.
+                                #[cfg(feature = "jni")]
+                                let _ = (|| -> Option<()> {
+                                    let jvm_guard   = JVM.read().ok()?;
+                                    let jvm         = jvm_guard.as_ref()?;
+                                    let class_guard = PROXY_SERVICE_CLASS.read().ok()?;
+                                    let class: &jni::objects::Global<jni::objects::JClass<'static>> = class_guard.as_ref()?;
+                                    jvm.attach_current_thread(|env| {
+                                        let level_j = env.new_string(&level)?;
+                                        let tag_j   = env.new_string("OxidOH-Native")?;
+                                        let msg_j   = env.new_string(&msg)?;
+                                        env.call_static_method(
+                                            class,
+                                            jni::jni_str!("nativeLog"),
+                                            jni::jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                                            &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
+                                        )?;
+                                        Ok::<(), jni::errors::Error>(())
+                                    }).ok()?;
+                                    Some(())
+                                })();
+                            }
+                        }
+                    }
                 }
-                let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-                logs.push_back(format!("[{}] {} -> {}", timestamp, msg.domain, msg.status));
             }
         });
     });
-    tx
-});
 
-enum NativeLog {
-    Message { level: String, msg: String },
-    Shutdown,
-}
-
-static NATIVE_LOG_SENDER: LazyLock<mpsc::UnboundedSender<NativeLog>> = LazyLock::new(|| {
-    let (tx, mut rx) = mpsc::unbounded_channel::<NativeLog>();
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        runtime.block_on(async {
-            while let Some(entry) = rx.recv().await {
-                let (level, msg) = match entry {
-                    NativeLog::Shutdown => break,
-                    NativeLog::Message { level, msg } => (level, msg),
-                };
-                // Log to Android logcat as fallback
-                match level.as_str() {
-                    "ERROR" => log::error!(target: "OxidOH-Native", "{}", msg),
-                    "WARN"  => log::warn!(target: "OxidOH-Native", "{}", msg),
-                    "INFO"  => log::info!(target: "OxidOH-Native", "{}", msg),
-                    _       => log::debug!(target: "OxidOH-Native", "{}", msg),
-                }
-                // Forward to Kotlin via JNI — flat closure avoids nested if-let pyramid
-                let _ = (|| -> Option<()> {
-                    let jvm_guard   = JVM.read().ok()?;
-                    let jvm   = jvm_guard.as_ref()?;
-                    let class_guard = PROXY_SERVICE_CLASS.read().ok()?;
-                    let class = class_guard.as_ref()?;
-                    jvm.attach_current_thread(|env| {
-                        let level_j = env.new_string(&level)?;
-                        let tag_j   = env.new_string("OxidOH-Native")?;
-                        let msg_j   = env.new_string(&msg)?;
-                        env.call_static_method(
-                            class,
-                            jni::jni_str!("nativeLog"),
-                            jni::jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
-                            &[(&level_j).into(), (&tag_j).into(), (&msg_j).into()],
-                        )?;
-                        Ok::<(), jni::errors::Error>(())
-                    }).ok();
-                    Some(())
-                })();
-            }
-        });
-    });
-    tx
+    LogWorkerSenders { query_tx, native_tx }
 });
 
 fn native_log(level: &str, msg: &str) {
@@ -118,7 +128,7 @@ fn native_log(level: &str, msg: &str) {
             _ => return,                     // Suppress DEBUG/TRACE in release
         }
     }
-    let _ = NATIVE_LOG_SENDER.send(NativeLog::Message {
+    let _ = LOG_WORKER.native_tx.send(NativeLog::Message {
         level: level.to_string(),
         msg: msg.to_string(),
     });
@@ -142,7 +152,7 @@ fn add_query_log(domain: String, status: String) {
     if !cfg!(debug_assertions) && status.contains("DEBUG") {
         return;
     }
-    let _ = LOG_SENDER.send(LogMessage { domain, status });
+    let _ = LOG_WORKER.query_tx.send(LogMessage { domain, status });
 }
 
 impl Stats {
@@ -270,7 +280,7 @@ impl DynamicResolver {
 }
 
 use reqwest::dns::{Resolve, Resolving, Name, Addrs};
-use rand::SeedableRng;
+
 impl Resolve for DynamicResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let name_str = name.as_str().to_string();
@@ -786,13 +796,12 @@ async fn handle_query(
         let config_contents: ObliviousDoHConfigContents = odoh_config.into();
 
         // Scope the rng tightly so it is dropped before the first .await.
-        // ThreadRng contains Rc<> and is !Send — it cannot live across an await
-        // point inside tokio::spawn. rand::rng() is the rand 0.9 name for thread_rng().
+        // rand::rng() returns the thread-local cached RNG (no syscall), which is
+        // !Send but safe here because it is dropped before any .await point.
         let (req_bytes, client_secret) = {
-            let mut rng = rand::rngs::StdRng::from_os_rng();
-            let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rng)?;
+            let (encrypted_query_msg, client_secret) = encrypt_query(&query_plaintext, &config_contents, &mut rand::rng())?;
             (compose(&encrypted_query_msg)?.freeze(), client_secret)
-        }; // rng dropped here, before any .await 
+        }; // rng dropped here, before any .await
 
         #[cfg(debug_assertions)] native_log("DEBUG", &format!("Sending ODoH query for {} to {} (padded to {} bytes, attempt {})", domain, resolver_url, padded_len, attempt));
 
@@ -1245,6 +1254,7 @@ pub mod jni_api {
     }
 
     #[unsafe(no_mangle)]
+    #[allow(deprecated)] // env.get_string: jni 0.22 deprecates it but the replacement (mutf8_chars) is more complex; suppress until migrated
     pub extern "system" fn Java_io_github_sms1sis_oxidoh_ProxyService_startProxy<'local>(
         mut unowned_env: jni::EnvUnowned<'local>,
         _class: JClass<'local>,
@@ -1260,10 +1270,10 @@ pub mod jni_api {
         exclude_domain: JString<'local>,
     ) -> jint {
         unowned_env.with_env(|env| {
-        let listen_addr: String = env.get_string(&listen_addr).unwrap().into();
+        let listen_addr: String        = env.get_string(&listen_addr).unwrap().into();
         let resolver_url_input: String = env.get_string(&resolver_url).unwrap().into();
-        let bootstrap_dns: String = env.get_string(&bootstrap_dns).unwrap().into();
-        let exclude_domain: String = env.get_string(&exclude_domain).unwrap().into();
+        let bootstrap_dns: String      = env.get_string(&bootstrap_dns).unwrap().into();
+        let exclude_domain: String     = env.get_string(&exclude_domain).unwrap().into();
         
         let urls = extract_urls(&resolver_url_input);
         if urls.is_empty() {
@@ -1351,13 +1361,18 @@ pub mod jni_api {
         _class: JClass<'local>,
     ) -> jni::sys::jobjectArray {
         match unowned_env.with_env(|env| {
-         let logs = QUERY_LOGS.lock().unwrap();
+         // Snapshot first: release the mutex before doing any JNI work so that
+         // add_query_log() is never blocked while we allocate Java strings.
+         let snapshot: Vec<String> = {
+             let logs = QUERY_LOGS.lock().unwrap();
+             logs.iter().cloned().collect()
+         };
          let cls = env.find_class(jni::strings::JNIString::from("java/lang/String")).unwrap();
          let initial = env.new_string("").unwrap();
-         let array = env.new_object_array(logs.len() as jni::sys::jsize, cls, &initial).unwrap();
-         for (i, log) in logs.iter().enumerate() {
+         let array = env.new_object_array(snapshot.len() as jni::sys::jsize, cls, &initial).unwrap();
+         for (i, log) in snapshot.iter().enumerate() {
              let s = env.new_string(log).unwrap();
-             env.set_object_array_element(&array, i, &s).unwrap();
+             array.set_element(env, i, &s).unwrap();
          }
          Ok::<jni::sys::jobjectArray, jni::errors::Error>(array.into_raw())
         }).into_outcome() {
@@ -1394,7 +1409,7 @@ pub mod jni_api {
         }
 
         let array = env.new_int_array(10).unwrap();
-        env.set_int_array_region(&array, 0, &values).unwrap();
+        array.set_region(env, 0, &values).unwrap();
         Ok::<jni::sys::jintArray, jni::errors::Error>(array.into_raw())
         }).into_outcome() {
             jni::Outcome::Ok(v) => v,
@@ -1431,7 +1446,7 @@ pub mod jni_api {
             token.cancel();
         }
         // Signal the native log thread to drain and exit cleanly
-        let _ = NATIVE_LOG_SENDER.send(NativeLog::Shutdown);
+        let _ = LOG_WORKER.native_tx.send(NativeLog::Shutdown);
     }
 
     #[unsafe(no_mangle)]

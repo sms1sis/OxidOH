@@ -242,9 +242,11 @@ class MainActivity : ComponentActivity() {
                         if (BuildConfig.DEBUG) Log.d("OxidOH", "UI Latency update: $newLat ms")
                         latency = newLat
                     }
-                    logs = ProxyService.getLogs()
                     stats = ProxyService.getStats()
                 }
+                // Fetch logs always — not just when running — so the viewer
+                // stays populated after the proxy stops and shows final entries.
+                logs = ProxyService.getLogs()
                 delay(1000)
             }
         }
